@@ -17,72 +17,32 @@ SUPABASE_HEADERS = {
 def extract_cgm_data(full_text):
     text = re.sub(r"\s+", " ", full_text).strip()
 
-    def extract_percentage(anchors, window=100):
-        anchor_pattern = "|".join(re.escape(anchor) for anchor in anchors)
-        pattern = re.compile(
-            rf"(?i)(?:"
-            rf"(?:{anchor_pattern}).{{0,{window}}}?([0-9]+(?:[.,][0-9]+)?)\s*%"
-            rf"|"
-            rf"([0-9]+(?:[.,][0-9]+)?)\s*%.{{0,{window}}}?(?:{anchor_pattern})"
-            rf")"
-        )
-        match = pattern.search(text)
-        if not match:
-            return None
-        value = match.group(1) or match.group(2)
-        try:
-            value = float(value.replace(",", "."))
-        except (ValueError, AttributeError):
-            return None
-        if not 0 <= value <= 100:
-            return None
-        return value
-
-    def extract_number(anchors, window=100, require_percent=False):
-        anchor_pattern = "|".join(re.escape(anchor) for anchor in anchors)
-        if require_percent:
-            number_pattern = r"([0-9]+(?:[.,][0-9]+)?)\s*%"
+    def get_val(anchors, is_gmi=False):
+        anchor_pattern = "|".join(re.escape(a) for a in anchors)
+        
+        # Gledamo do 200 karaktera unapred u sortiranom tekstu
+        if is_gmi:
+            # GMI je specifičan broj (npr 6.5)
+            pattern = re.compile(rf"(?i)({anchor_pattern}).{{0,200}}?([4-9][.,][0-9]|1[0-4][.,][0-9])\s*%?")
         else:
-            number_pattern = r"([0-9]+(?:[.,][0-9]+)?)\s*%?"
-        pattern = re.compile(
-            rf"(?i)(?:"
-            rf"(?:{anchor_pattern}).{{0,{window}}}?{number_pattern}"
-            rf"|"
-            rf"{number_pattern}.{{0,{window}}}?(?:{anchor_pattern})"
-            rf")"
-        )
+            # Ostali su standardni procenti
+            pattern = re.compile(rf"(?i)({anchor_pattern}).{{0,200}}?([0-9]{{1,3}}(?:[.,][0-9])?)\s*%")
+            
         match = pattern.search(text)
-        if not match:
-            return None
-        values = [g for g in match.groups() if g is not None]
-        if not values:
-            return None
-        value = values[0]
-        try:
-            return float(value.replace(",", "."))
-        except (ValueError, AttributeError):
-            return None
+        if match:
+            try:
+                val = float(match.group(2).replace(",", "."))
+                if 0 <= val <= 100:
+                    return val
+            except:
+                pass
+        return None
 
-    tir = extract_percentage([
-        "Time in Range", "U ciljnom opsegu", "U ciljanom opsegu", 
-        "Target range", "In range", "Within range"
-    ])
-    tbr = extract_percentage([
-        "Time Below Range", "Below range", "Ispod opsega", 
-        "Ispod ciljnog opsega", "Nisko", "Low"
-    ])
-    tar = extract_percentage([
-        "Time Above Range", "Above range", "Iznad opsega", 
-        "Iznad ciljnog opsega", "Visoko", "High"
-    ])
-    gmi = extract_number([
-        "GMI", "Glucose Management Indicator", "Estimated A1c", 
-        "Estimated HbA1c", "Procijenjeni A1c", "Procenjeni A1c"
-    ], require_percent=True)
-    cv = extract_percentage([
-        "Coefficient of Variation", "Coefficient of Variability", 
-        "CV", "Varijabilnost", "Glycemic Variability"
-    ])
+    tir = get_val(["Time in Range", "U ciljnom opsegu", "U ciljanom opsegu", "Target range", "In range", "Ciljni opseg"])
+    tbr = get_val(["Time Below Range", "Below range", "Ispod opsega", "Nisko", "Low", "Ispod ciljnog"])
+    tar = get_val(["Time Above Range", "Above range", "Iznad opsega", "Visoko", "High", "Iznad ciljnog"])
+    gmi = get_val(["GMI", "Glucose Management Indicator", "Estimated A1c", "Procijenjeni A1c", "Procenjeni A1c"], is_gmi=True)
+    cv = get_val(["Coefficient of Variation", "CV", "Varijabilnost", "Glycemic Variability"])
 
     return {
         "tir_percent": tir,
@@ -158,10 +118,20 @@ def patient_form():
 async def upload_report(file: UploadFile = File(...)):
     content = await file.read()
     doc = fitz.open(stream=content, filetype="pdf")
-    full_text = " ".join([page.get_text() for page in doc])
+    
+    # TAJNA ZA PDF: Ekstrakcija i sortiranje vizuelnih blokova (odozgo na dole, sleva na desno)
+    blocks = []
+    for page in doc:
+        for b in page.get_text("blocks"):
+            blocks.append(b)
+            
+    # Sortiramo po Y osi, pa po X osi
+    blocks.sort(key=lambda b: (b[1], b[0]))
+    full_text = " ".join([b[4] for b in blocks if isinstance(b[4], str)])
     
     patient_id = "P-000127"
     
+    # Provera pacijenta u bazi
     patient_check = requests.get(
         f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
         headers=SUPABASE_HEADERS
@@ -173,29 +143,34 @@ async def upload_report(file: UploadFile = File(...)):
             json={"patient_id": patient_id, "name": "Stefan Jovanović"}
         )
 
-    # Pozivanje pametne funkcije za ekstrakciju podataka
-    extracted_data = extract_cgm_data(full_text)
+    # Izvršavanje pametne ekstrakcije na lepo sortiranom tekstu
+    extracted = extract_cgm_data(full_text)
 
-    # Detekcija proizvođača iz naziva fajla
-    filename_lower = file.filename.lower()
-    if "mysugr" in filename_lower:
-        manufacturer = "mySugr"
-    elif "dexcom" in filename_lower:
-        manufacturer = "Dexcom"
-    elif "freestyle" in filename_lower or "abbott" in filename_lower:
-        manufacturer = "Abbott"
+    # Čišćenje imena proizvođača i fajla za lepši prikaz na frontendu
+    fname = file.filename.lower()
+    if "mysugr" in fname:
+        manuf = "mySugr"
+        dname = "mySugr AGP Izveštaj"
+    elif "dexcom" in fname:
+        manuf = "Dexcom"
+        dname = "Dexcom AGP Izveštaj"
+    elif "agp" in fname or "libre" in fname:
+        manuf = "Abbott"
+        dname = "FreeStyle Libre AGP"
     else:
-        manufacturer = "Standardni CGM"
+        manuf = "Standardni CGM"
+        dname = "CGM Izveštaj"
 
+    # Koristimo nule umesto null ako neki podatak slučajno ne postoji, da ne pukne prikaz
     parsed_data = {
         "patient_id": patient_id,
-        "device_name": file.filename,
-        "manufacturer": manufacturer,
-        "tir": extracted_data["tir_percent"],
-        "tbr": extracted_data["tbr_percent"],
-        "tar": extracted_data["tar_percent"],
-        "gmi_percent": extracted_data["gmi_percent"],
-        "cv": extracted_data["cv_percent"],
+        "device_name": dname,
+        "manufacturer": manuf,
+        "tir": extracted["tir_percent"] if extracted["tir_percent"] is not None else 0.0,
+        "tbr": extracted["tbr_percent"] if extracted["tbr_percent"] is not None else 0.0,
+        "tar": extracted["tar_percent"] if extracted["tar_percent"] is not None else 0.0,
+        "gmi_percent": extracted["gmi_percent"] if extracted["gmi_percent"] is not None else 0.0,
+        "cv": extracted["cv_percent"] if extracted["cv_percent"] is not None else 0.0,
         "active_time": "100%"
     }
     
