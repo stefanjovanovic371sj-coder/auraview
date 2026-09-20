@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import requests
 import pymupdf as fitz
 import re
+from datetime import datetime
 
 app = FastAPI()
 
@@ -36,7 +37,7 @@ METRIC_ONTOLOGY = {
         "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
     },
     "GMI": {
-        "aliases": ["glucose management indicator", "(gmi)", "gmi"],
+        "aliases": ["glucose management indicator", "gmi", "(gmi)"],
         "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (4, 15)
     },
     "CV": {
@@ -49,7 +50,7 @@ METRIC_ONTOLOGY = {
     },
     "AVG_GLUCOSE": {
         "aliases": ["average glucose", "mean glucose"],
-        "expected_role": "ACTUAL", "expected_unit": "DECIMAL", "valid_range": (2, 25)
+        "expected_role": "ACTUAL", "expected_unit": "mmol/L", "valid_range": (2, 35)
     }
 }
 
@@ -60,17 +61,20 @@ class UniversalCGMParser:
         self.regions = []
         self.candidates = []
         self.anchors = []
+        self.associations = []
         self.results = {key: None for key in METRIC_ONTOLOGY.keys()}
+        self.derived_metrics = {"TBR": None, "TIR": None, "TAR": None}
+        self.validation_warnings = []
         self.reporting_period = {"start": None, "end": None}
 
     def parse(self):
         self._ingest_pdf()
         self._build_layout()
-        self._classify_regions()
         self._extract_candidates()
         self._extract_anchors()
         self._associate_labels_and_values()
         self._derive_standardized_metrics()
+        self._validate_cluster()
         self._extract_reporting_period()
         return self._generate_final_report()
 
@@ -141,68 +145,81 @@ class UniversalCGMParser:
             "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
             "text": text,
             "lines": lines,
-            "words": flat_words,
-            "context_type": "UNKNOWN"
+            "words": flat_words
         })
 
-    def _classify_regions(self):
-        for r in self.regions:
-            if any(k in r["text"] for k in ["goal", "goals", "target", "recommended", "reference", "desired", "clinical target"]):
-                r["context_type"] = "GOAL_ZONE"
-            else:
-                r["context_type"] = "ACTUAL_ZONE"
-
-    def _is_descriptive_context(self, line_text):
-        lower = line_text.lower()
-        if "median" in lower or "percentile" in lower:
-            return True
-        if "of time in ranges" in lower or ("=" in line_text and "min" in lower):
-            return True
-        if re.search(r'\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b', line_text):
-            return True
-        return False
-
     def _extract_candidates(self):
+        """Precizno mapiranje regex match-a na tačne word tokene i njihove character span bbox-ove."""
         for r in self.regions:
-            for line in r["lines"]:
-                line_text = " ".join([w["text"] for w in line])
+            for line_idx, line in enumerate(r["lines"]):
+                # Sastavljanje linije i praćenje pozicija karaktera za precizan overlap
+                line_tokens = line
+                line_text_parts = []
+                token_char_spans = []
+                current_pos = 0
+                
+                for t in line_tokens:
+                    t_text = t["text"]
+                    start = current_pos
+                    end = start + len(t_text)
+                    token_char_spans.append({"start": start, "end": end, "token": t})
+                    line_text_parts.append(t_text)
+                    current_pos = end + 1 # uračunat razmak
+                
+                line_text = " ".join(line_text_parts)
                 line_text_lower = line_text.lower()
                 
-                if self._is_descriptive_context(line_text):
-                    continue
-
-                matches = re.finditer(r'([<>]?)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(%)?', line_text)
+                # Detekcija opisnih/deskriptivnih konteksta
+                is_descriptive = any(k in line_text_lower for k in ["median", "percentile", "of time in ranges", "=", "defined as"])
+                
+                matches = re.finditer(r'([<>]?)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(mmol/L|mg/dL|%)?', line_text)
                 for match in matches:
                     operator = match.group(1)
                     val_str = match.group(2)
-                    has_percent = bool(match.group(3))
+                    unit_str = match.group(3)
                     val = float(val_str.replace(',', '.'))
                     
-                    matched_words = [w for w in line if val_str in w["text"] or (has_percent and "%" in w["text"])]
-                    if not matched_words:
-                        matched_words = line
+                    m_start = match.start(2)
+                    m_end = match.end(2)
+                    if unit_str:
+                        m_end = match.end(3)
+
+                    # Pronalaženje tokena koji se preklapaju sa character span-om broja/jedinice
+                    overlapping_tokens = []
+                    for span in token_char_spans:
+                        if not (span["end"] < m_start or span["start"] > m_end):
+                            overlapping_tokens.append(span["token"])
                     
-                    bx0 = min(w["x0"] for w in matched_words)
-                    by0 = min(w["y0"] for w in matched_words)
-                    bx1 = max(w["x1"] for w in matched_words)
-                    by1 = max(w["y1"] for w in matched_words)
+                    if not overlapping_tokens:
+                        overlapping_tokens = line_tokens
+
+                    bx0 = min(w["x0"] for w in overlapping_tokens)
+                    by0 = min(w["y0"] for w in overlapping_tokens)
+                    bx1 = max(w["x1"] for w in overlapping_tokens)
+                    by1 = max(w["y1"] for w in overlapping_tokens)
                     
+                    # Određivanje lokalne semantičke uloge bez ishitrenog odbacivanja celih regiona
+                    role = "UNKNOWN"
                     if operator or any(k in line_text_lower for k in ["goal", "target", "recommended", "reference", "desired", "clinical target"]):
-                        continue
-                    elif r["context_type"] == "GOAL_ZONE":
-                        continue
+                        role = "GOAL"
+                    elif is_descriptive:
+                        role = "UNKNOWN" # deskriptivna vrednost nije patient result
                     else:
                         role = "ACTUAL"
-                    
+
+                    unit_mapped = "%" if unit_str == "%" else ("mmol/L" if unit_str == "mmol/L" else ("mg/dL" if unit_str == "mg/dL" else "DECIMAL"))
+
                     self.candidates.append({
                         "raw_text": match.group(0),
                         "value": val,
-                        "unit": "%" if has_percent else "DECIMAL",
+                        "unit": unit_mapped,
                         "semantic_role": role,
                         "bbox": {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1, "cx": (bx0+bx1)/2, "cy": (by0+by1)/2},
                         "page": line[0]["page"],
                         "region_id": r["region_id"],
-                        "line_text": line_text_lower
+                        "line_id": f"line_{line[0]['block']}_{line[0]['line']}",
+                        "line_text": line_text_lower,
+                        "context_type": r.get("context_type", "UNKNOWN")
                     })
 
     def _extract_anchors(self):
@@ -213,7 +230,7 @@ class UniversalCGMParser:
                 for m_key, m_data in METRIC_ONTOLOGY.items():
                     for alias in m_data["aliases"]:
                         if alias in line_text:
-                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 20 for a in self.anchors):
+                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 25 for a in self.anchors):
                                 self.anchors.append({
                                     "metric": m_key,
                                     "expected_role": m_data["expected_role"],
@@ -227,52 +244,95 @@ class UniversalCGMParser:
                                 })
 
     def _associate_labels_and_values(self):
+        """Višefaktorsko bodovanje i povezivanje labela i vrednosti kroz više redova."""
         for anchor in self.anchors:
             valid_candidates = []
             for c in self.candidates:
                 if c["page"] != anchor["page"]: continue
-                if c["unit"] != anchor["expected_unit"]:
-                    if anchor["metric"] != "GMI": continue
+                if c["semantic_role"] != "ACTUAL": 
+                    self.associations.append({
+                        "metric": anchor["metric"], "label_text": anchor["raw_text"], "value": c["value"], "unit": c["unit"],
+                        "score": 0.0, "reason": "GOAL_CONTEXT" if c["semantic_role"] == "GOAL" else "UNKNOWN_OR_EXCLUDED_CONTEXT",
+                        "label_bbox": anchor["bbox"], "value_bbox": c["bbox"], "rejected": True
+                    })
+                    continue
                 
+                # Validacija jedinica
+                if anchor["expected_unit"] == "%" and c["unit"] != "%":
+                    self.associations.append({
+                        "metric": anchor["metric"], "label_text": anchor["raw_text"], "value": c["value"], "unit": c["unit"],
+                        "score": 0.0, "reason": "WRONG_UNIT", "label_bbox": anchor["bbox"], "value_bbox": c["bbox"], "rejected": True
+                    })
+                    continue
+                if anchor["expected_unit"] == "mmol/L" and c["unit"] not in ["mmol/L", "mg/dL", "DECIMAL"]:
+                    continue
+
                 v_min, v_max = METRIC_ONTOLOGY[anchor["metric"]]["valid_range"]
-                if not (v_min <= c["value"] <= v_max): continue
-                
-                y_diff = abs(c["bbox"]["cy"] - anchor["cy"])
+                if not (v_min <= c["value"] <= v_max):
+                    self.associations.append({
+                        "metric": anchor["metric"], "label_text": anchor["raw_text"], "value": c["value"], "unit": c["unit"],
+                        "score": 0.0, "reason": "OUT_OF_RANGE", "label_bbox": anchor["bbox"], "value_bbox": c["bbox"], "rejected": True
+                    })
+                    continue
+
+                y_diff = c["bbox"]["cy"] - anchor["cy"] # može biti i iznad i ispod
                 x_diff = abs(c["bbox"]["cx"] - anchor["cx"])
-                
-                if y_diff < 40 or c["region_id"] == anchor["region_id"]:
-                    score = 0.7
-                    if y_diff < 15: score += 0.2
-                    if c["region_id"] == anchor["region_id"]: score += 0.1
-                        
+                abs_y_diff = abs(y_diff)
+
+                # Dozvoljavamo vertikalni raspon do 60 piksela (podržava multi-line labele) i horizontalnu bliskost
+                if abs_y_diff <= 65:
+                    score = 0.5
+                    reason_parts = ["SEMANTIC_AND_UNIT_MATCH"]
+                    
+                    if abs_y_diff <= 25:
+                        score += 0.3
+                        reason_parts.append("CLOSE_VERTICAL_PROXIMITY")
+                    else:
+                        score += 0.1
+                        reason_parts.append("MULTI_LINE_PROXIMITY")
+
+                    if c["region_id"] == anchor["region_id"]:
+                        score += 0.15
+                        reason_parts.append("SAME_REGION")
+
                     valid_candidates.append({
                         "candidate": c,
-                        "score": score,
-                        "distance": x_diff + (y_diff * 2)
+                        "score": round(score, 2),
+                        "distance": x_diff + (abs_y_diff * 2),
+                        "reason": " | ".join(reason_parts)
                     })
             
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: (-x["score"], x["distance"]))
                 best = valid_candidates[0]
                 
-                current_result = self.results[anchor["metric"]]
-                if not current_result or best["score"] > current_result["confidence"]:
+                # Provera ambiguiteta
+                if len(valid_candidates) > 1 and (best["score"] - valid_candidates[1]["score"] < 0.1):
+                    self.results[anchor["metric"]] = None
+                    continue
+
+                current_res = self.results[anchor["metric"]]
+                if not current_res or best["score"] > current_res["confidence"]:
                     self.results[anchor["metric"]] = {
                         "value": best["candidate"]["value"],
-                        "confidence": round(best["score"], 2),
+                        "confidence": best["score"],
                         "status": "OK",
                         "semantic_role": "ACTUAL",
                         "page": anchor["page"],
                         "source": {
                             "label_text": anchor["raw_text"],
                             "value_text": best["candidate"]["raw_text"],
+                            "label_bbox": anchor["bbox"],
+                            "value_bbox": best["candidate"]["bbox"],
                             "region_id": best["candidate"]["region_id"]
                         }
                     }
+                    self.associations.append({
+                        "metric": anchor["metric"], "label_text": anchor["raw_text"], "value": best["candidate"]["value"], "unit": best["candidate"]["unit"],
+                        "score": best["score"], "reason": best["reason"], "label_bbox": anchor["bbox"], "value_bbox": best["candidate"]["bbox"], "rejected": False
+                    })
 
     def _derive_standardized_metrics(self):
-        self.derived_metrics = {}
-        
         vl = self.results.get("VERY_LOW")
         low = self.results.get("LOW")
         in_range = self.results.get("IN_RANGE")
@@ -283,40 +343,63 @@ class UniversalCGMParser:
         self.derived_metrics["TIR"] = in_range["value"] if in_range and in_range.get("value") is not None else None
         self.derived_metrics["TAR"] = round(high["value"] + vh["value"], 1) if high and vh and high.get("value") is not None and vh.get("value") is not None else None
 
+    def _validate_cluster(self):
+        vl = self.results.get("VERY_LOW")
+        low = self.results.get("LOW")
+        in_range = self.results.get("IN_RANGE")
+        high = self.results.get("HIGH")
+        vh = self.results.get("VERY_HIGH")
+
+        if all(x and x.get("value") is not None for x in [vl, low, in_range, high, vh]):
+            total = vl["value"] + low["value"] + in_range["value"] + high["value"] + vh["value"]
+            if abs(total - 100.0) <= 2.0:
+                for k in ["VERY_LOW", "LOW", "IN_RANGE", "HIGH", "VERY_HIGH"]:
+                    if self.results[k]:
+                        self.results[k]["confidence"] = min(1.0, self.results[k]["confidence"] + 0.1)
+                self.validation_warnings.append(f"RANGE_BREAKDOWN_SUM_VALIDATED: {total}%")
+            else:
+                self.validation_warnings.append(f"RANGE_BREAKDOWN_SUM_WARNING: Sum is {total}%")
+
     def _extract_reporting_period(self):
-        date_pattern = r'\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b'
+        date_pattern = r'\b(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\b'
         for page in self.pages:
             full_page_text = " ".join([w["text"] for w in page["raw_words"]])
-            dates = re.findall(date_pattern, full_page_text)
-            if len(dates) >= 2:
-                self.reporting_period["start"] = dates[0]
-                self.reporting_period["end"] = dates[1]
+            match = re.search(date_pattern, full_page_text)
+            if match:
+                d1_str = match.group(1)
+                d2_str = match.group(2)
+                try:
+                    dt1 = datetime.strptime(d1_str, "%d %b %Y")
+                    dt2 = datetime.strptime(d2_str, "%d %b %Y")
+                    if dt1 <= dt2:
+                        self.reporting_period["start"] = d1_str
+                        self.reporting_period["end"] = d2_str
+                    else:
+                        self.reporting_period["start"] = d2_str
+                        self.reporting_period["end"] = d1_str
+                except Exception:
+                    self.reporting_period["start"] = d1_str
+                    self.reporting_period["end"] = d2_str
                 break
 
     def _generate_final_report(self):
-        actual_metrics = {}
-        for key, res in self.results.items():
-            if res and res.get("value") is not None:
-                actual_metrics[key] = res["value"]
-            else:
-                actual_metrics[key] = None
+        actual_components = {}
+        for key in METRIC_ONTOLOGY.keys():
+            res = self.results.get(key)
+            actual_components[key] = res["value"] if res and res.get("value") is not None else None
 
         return {
-            "status": "SUCCESS",
             "reporting_period": self.reporting_period,
-            "actual_components": actual_metrics,
+            "actual_components": actual_components,
             "derived_metrics": self.derived_metrics,
             "debug_raw_data": {
-                "total_pages": len(self.pages),
-                "pages": [{
-                    "page_number": p["page_num"],
-                    "width": p["width"],
-                    "height": p["height"],
-                    "word_count": len(p["raw_words"]),
-                    "words": p["raw_words"][:100]
-                } for p in self.pages],
+                "raw_words": [w["text"] for p in self.pages for w in p["raw_words"][:150]],
+                "regions": [{"region_id": r["region_id"], "bbox": r["bbox"], "text": r["text"][:100]} for r in self.regions],
                 "extracted_candidates": self.candidates,
-                "detected_anchors": self.anchors
+                "detected_anchors": self.anchors,
+                "associations": self.associations,
+                "derived_metrics": self.derived_metrics,
+                "validation_warnings": self.validation_warnings
             }
         }
 
@@ -328,22 +411,52 @@ async def debug_parser_test(file: UploadFile = File(...)):
     report = parser.parse()
     return JSONResponse(content=report)
 
+@app.post("/upload")
+async def upload_report(file: UploadFile = File(...)):
+    content = await file.read()
+    doc = fitz.open(stream=content, filetype="pdf")
+    patient_id = "P-000127"
+    
+    parser = UniversalCGMParser(doc)
+    extracted = parser.parse()
+    
+    actuals = extracted["actual_components"]
+    derived = extracted["derived_metrics"]
+    
+    parsed_data = {
+        "patient_id": patient_id, 
+        "device_name": "mySugr AGP Izveštaj", 
+        "manufacturer": "mySugr",
+        "tir": derived.get("TIR"), 
+        "tbr": derived.get("TBR"), 
+        "tar": derived.get("TAR"),
+        "gmi_percent": actuals.get("GMI"), 
+        "cv": actuals.get("CV"), 
+        "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None
+    }
+    
+    response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
+    if response.status_code not in [200, 201]: 
+        raise HTTPException(status_code=500, detail=f"Baza odbila: {response.text}")
+        
+    return {"status": "success", "data": parsed_data, "engine_report": extracted}
+
 @app.get("/", response_class=HTMLResponse)
 def patient_form():
     return """
 <!DOCTYPE html>
 <html lang="sr"><head><meta charset="UTF-8"><title>Parser Test & Debug Mode</title></head>
 <body style="font-family:sans-serif; background:#0f172a; color:#f8fafc; padding:20px; display:flex; justify-content:center;">
-<div style="width:100%; max-width:800px;">
+<div style="width:100%; max-width:900px;">
 <h2>CGM Parser Test & Debug Inspector</h2>
 <div style="display:flex; gap:10px; margin-bottom:15px;">
     <button onclick="switchTab('result')" id="btnRes" style="background:#0d9488; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">Parsed Result</button>
-    <button onclick="switchTab('debug')" id="btnDbg" style="background:#334155; color:#cbd5e1; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">Debug Inspector (Raw Words & BBoxes)</button>
+    <button onclick="switchTab('debug')" id="btnDbg" style="background:#334155; color:#cbd5e1; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">Debug Inspector (Associations & Raw Data)</button>
 </div>
 <div style="background:#1e293b; padding:20px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.3);">
 <form id="f"><input type="file" id="fi" accept=".pdf" required style="margin-bottom:15px; color:#cbd5e1;"><br>
 <button type="submit" style="background:#0d9488; color:white; border:none; padding:10px 20px; border-radius:6px; font-weight:bold; cursor:pointer;">Pokreni Analizu Izveštaja</button></form>
-<pre id="s" style="margin-top:15px; font-size:11px; max-height:450px; overflow:auto; background:#030712; padding:15px; border-radius:6px; color:#34d399;"></pre>
+<pre id="s" style="margin-top:15px; font-size:11px; max-height:500px; overflow:auto; background:#030712; padding:15px; border-radius:6px; color:#34d399;"></pre>
 </div></div>
 <script>
 let lastData = null;
@@ -362,7 +475,6 @@ function renderOutput() {
     if(!lastData) return;
     if(currentTab === 'result') {
         const displayObj = {
-            status: lastData.status,
             reporting_period: lastData.reporting_period,
             actual_components: lastData.actual_components,
             derived_metrics: lastData.derived_metrics
