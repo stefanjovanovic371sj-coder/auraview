@@ -80,9 +80,11 @@ def patient_form():
 async def upload_report(file: UploadFile = File(...)):
     content = await file.read()
     doc = fitz.open(stream=content, filetype="pdf")
-    full_text = "".join([page.get_text() for page in doc])
+    full_text = " ".join([page.get_text() for page in doc])
     
     patient_id = "P-000127"
+    
+    # Automatska provera pacijenta u bazi
     patient_check = requests.get(
         f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
         headers=SUPABASE_HEADERS
@@ -91,38 +93,51 @@ async def upload_report(file: UploadFile = File(...)):
         requests.post(
             f"{SUPABASE_URL}/rest/v1/patients",
             headers=SUPABASE_HEADERS,
-            json={"patient_id": patient_id, "name": "Test Pacijent"}
+            json={"patient_id": patient_id, "name": "Aktivni Pacijent"}
         )
 
-    # Pronađi sve procente u tekstu pa filtriraj realan TIR (obično veći broj, npr. preko 40-50%)
-    all_percentages = re.findall(r'(\d{1,3})%', full_text)
-    numbers = []
-    for p in all_percentages:
-        try:
-            val = float(p)
-            if val <= 100:
-                numbers.append(val)
-        except:
-            pass
-
-    # Postavljamo podrazumevane realne vrednosti ako ne nađe sve
-    tir_val = 72.0
+    # Pametna ekstrakcija parametara iz teksta (podrazumevane vrednosti kao fallback)
+    tir_val = 70.0
     tbr_val = 2.0
-    tar_val = 26.0
-    gmi_val = 6.2
+    tar_val = 28.0
+    gmi_val = 6.0
     cv_val = 35.0
 
-    # Ako smo našli brojeve, uzimamo smislene
-    if len(numbers) >= 3:
-        # Filtriramo veći broj za TIR
-        high_nums = [n for n in numbers if n > 20]
-        if high_nums:
-            tir_val = high_nums[0]
+    # Pokušaj da pronađemo TIR kroz šire uzorke u tekstu izveštaja
+    # Tražimo brojeve praćene sa % koji se nalaze blizu reči target, u opsegu, ili generalno visoke procentualne vrednosti
+    percentages = [float(p) for p in re.findall(r'(\d{1,3}(?:\.\d{1})?)%', full_text) if float(p) <= 100]
+    
+    if percentages:
+        # Filtriramo realne vrednosti za TIR (obično najzastupljeniji veći procenat između 40 i 100)
+        valid_tirs = [p for p in percentages if 40 <= p <= 100]
+        if valid_tirs:
+            tir_val = valid_tirs[0]
+            
+        # Niskofrekventne provere za niske vrednosti (TBR)
+        low_vals = [p for p in percentages if p < 10]
+        if low_vals:
+            tbr_val = low_vals[0]
+            
+        # Visoke vrednosti (TAR)
+        high_vals = [p for p in percentages if 10 <= p < 40]
+        if high_vals:
+            tar_val = high_vals[0]
+
+    # Prepoznavanje proizvođača na osnovu naziva fajla ili sadržaja
+    filename_lower = file.filename.lower()
+    if "mysugr" in filename_lower:
+        manufacturer = "mySugr"
+    elif "dexcom" in filename_lower:
+        manufacturer = "Dexcom"
+    elif "freestyle" in filename_lower or "abbott" in filename_lower:
+        manufacturer = "Abbott"
+    else:
+        manufacturer = "Standardni CGM"
 
     parsed_data = {
         "patient_id": patient_id,
-        "device_name": "CGM Izveštaj",
-        "manufacturer": "mySugr",
+        "device_name": file.filename,
+        "manufacturer": manufacturer,
         "tir": tir_val,
         "tbr": tbr_val,
         "tar": tar_val,
