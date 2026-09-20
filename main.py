@@ -82,6 +82,20 @@ async def upload_report(file: UploadFile = File(...)):
     doc = fitz.open(stream=content, filetype="pdf")
     full_text = "".join([page.get_text() for page in doc])
     
+    # 1. Automatski proveri ili kreiraj pacijenta u bazi
+    patient_id = "P-000127"
+    patient_check = requests.get(
+        f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
+        headers=SUPABASE_HEADERS
+    )
+    if not patient_check.json():
+        # Ako pacijent ne postoji, kreiraj ga automatski
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/patients",
+            headers=SUPABASE_HEADERS,
+            json={"patient_id": patient_id, "name": "Test Pacijent"}
+        )
+
     tir_val = 70.0
     tbr_val = 2.0
     tar_val = 28.0
@@ -96,7 +110,7 @@ async def upload_report(file: UploadFile = File(...)):
             pass
 
     parsed_data = {
-        "patient_id": "Pacijent-01",
+        "patient_id": patient_id,
         "device_name": "CGM Izveštaj",
         "manufacturer": "mySugr",
         "tir": tir_val,
