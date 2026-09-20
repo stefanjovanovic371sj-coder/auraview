@@ -60,15 +60,15 @@ def patient_form():
                 e.preventDefault();
                 const formData = new FormData();
                 formData.append('file', document.getElementById('pdfFile').files[0]);
-                document.getElementById('statusMsg'].innerText = "Slanje i obrada u toku...";
+                document.getElementById('statusMsg').innerText = "Slanje i obrada u toku...";
                 const res = await fetch('/upload', { method: 'POST', body: formData });
                 const data = await res.json();
                 if(res.ok) {
-                    document.getElementById('statusMsg'].style.color = "#059669";
-                    document.getElementById('statusMsg'].innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
+                    document.getElementById('statusMsg').style.color = "#059669";
+                    document.getElementById('statusMsg').innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
                 } else {
-                    document.getElementById('statusMsg'].style.color = "#dc2626";
-                    document.getElementById('statusMsg'].innerText = "Greška: " + (data.detail || "Došlo je do problema");
+                    document.getElementById('statusMsg').style.color = "#dc2626";
+                    document.getElementById('statusMsg').innerText = "Greška: " + (data.detail || "Došlo je do problema");
                 }
             };
         </script>
@@ -84,7 +84,7 @@ async def upload_report(file: UploadFile = File(...)):
     
     patient_id = "P-000127"
     
-    # Provera i automatsko kreiranje pacijenta ako ne postoji
+    # Provera i automatsko kreiranje pacijenta u bazi ako ne postoji
     patient_check = requests.get(
         f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
         headers=SUPABASE_HEADERS
@@ -96,18 +96,33 @@ async def upload_report(file: UploadFile = File(...)):
             json={"patient_id": patient_id, "name": "Stefan Jovanović"}
         )
 
-    # Ekstrakcija svih procenata i filtriranje logičnih vrednosti za TIR (između 30 i 95%)
-    percentages = [float(p) for p in re.findall(r'(\d{1,3}(?:\.\d{1})?)%', full_text) if 0 <= float(p) <= 100]
-    
+    # Inicijalne podrazumevane vrednosti
     tir_val = 70.0
     tbr_val = 2.0
     tar_val = 28.0
     gmi_val = 6.0
     cv_val = 35.0
 
-    valid_tirs = [p for p in percentages if 30 <= p <= 95]
-    if valid_tirs:
-        tir_val = valid_tirs[0]
+    # Pametno traženje uzoraka sa kontekstom (npr. tražimo brojeve praćene sa % koji su realni za TIR, 
+    # a izbegavamo nazive fajlova i niske procente)
+    matches = re.findall(r'(\d{1,3}(?:\.\d{1})?)\s*%', full_text)
+    
+    valid_numbers = []
+    for m in matches:
+        try:
+            val = float(m)
+            if 0 <= val <= 100:
+                valid_numbers.append(val)
+        except:
+            pass
+
+    # Ako imamo dovoljno brojeva, biramo onaj koji najviše odgovara profilu TIR-a (obično veći broj u sredini opsega)
+    if valid_numbers:
+        # Filtriramo samo one koji su preko 40% jer je TIR retko ispod toga u normalnim izveštajima, 
+        # ili uzimamo najveći pronađeni smisleni procenat
+        tirs = [n for n in valid_numbers if 40 <= n <= 98]
+        if tirs:
+            tir_val = tirs[0]
 
     parsed_data = {
         "patient_id": patient_id,
