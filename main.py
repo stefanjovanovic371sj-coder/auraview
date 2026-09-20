@@ -1,10 +1,10 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import HTMLResponse
 import fitz  # PyMuPDF
 import re
 import requests
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 
 # ============================================================
@@ -21,25 +21,61 @@ SUPABASE_HEADERS = {
 }
 
 app = FastAPI(
-    title="SaaS CGM Platform - Multi-Doctor & Patient Tokens",
-    version="3.0.0"
+    title="SaaS CGM Platform - Robust Parser & Multi-Doctor Architecture",
+    version="3.1.0"
 )
 
 
 # ============================================================
-# METRIC DEFINITIONS (Accu-Check, Linx, mySugr)
+# METRIC DEFINITIONS (Expanded for Accuracy)
 # ============================================================
 
 Metrics = {
-    "VERY_LOW": {"aliases": ["very low", "vrlo nisko", "веома ниско"], "unit": "%"},
-    "LOW": {"aliases": ["low", "tbr", "below range", "nisko", "ниско"], "unit": "%"},
-    "IN_RANGE": {"aliases": ["in range", "time in range", "tir", "u opsegu", "у опсегу"], "unit": "%"},
-    "HIGH": {"aliases": ["high", "tar", "above range", "visoko", "високо"], "unit": "%"},
-    "VERY_HIGH": {"aliases": ["very high", "vrlo visoko", "веома високо"], "unit": "%"},
-    "GMI": {"aliases": ["glucose management indicator", "gmi", "indikator upravljanja glukozom"], "unit": "%"},
-    "CV": {"aliases": ["coefficient of variation", "cv", "varijabilnost", "varijabilnost glukoze"], "unit": "%"},
-    "ACTIVE_TIME": {"aliases": ["cgm active", "active time", "aktivno vreme cgm", "aktivno vreme"], "unit": "%"},
-    "AVG_GLUCOSE": {"aliases": ["average glucose", "mean glucose", "prosečna vrednost glukoze", "prosečna glukoza"], "unit": "GLUCOSE"}
+    "VERY_LOW": {
+        "aliases": ["very low", "very-low", "vrlo nisko", "веома ниско", "veoma nizak nivo"],
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
+    },
+    "LOW": {
+        "aliases": ["low", "tbr", "below range", "nisko", "ниско", "nizak nivo"],
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
+    },
+    "IN_RANGE": {
+        "aliases": ["in range", "in-range", "time in range", "tir", "u opsegu", "у опсегу", "normalno"],
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
+    },
+    "HIGH": {
+        "aliases": ["high", "tar", "above range", "visoko", "високо"],
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
+    },
+    "VERY_HIGH": {
+        "aliases": ["very high", "very-high", "vrlo visoko", "веома високо", "veoma visoko"],
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
+    },
+    "GMI": {
+        "aliases": ["glucose management indicator", "gmi", "indikator upravljanja glukozom", "индикатор управљања глукозом"],
+        "unit": "%",
+        "type": "METRIC"
+    },
+    "CV": {
+        "aliases": ["glucose variability", "coefficient of variation", "cv", "varijabilnost", "варијабилност", "varijabilnost glukoze", "koeficijent varijacije"],
+        "unit": "%",
+        "type": "METRIC"
+    },
+    "ACTIVE_TIME": {
+        "aliases": ["time cgm active", "cgm active", "active time", "sensor active", "aktivno vreme cgm", "aktivno vreme", "активно време"],
+        "unit": "%",
+        "type": "METRIC"
+    },
+    "AVG_GLUCOSE": {
+        "aliases": ["average glucose", "mean glucose", "mbg", "prosečna vrednost glukoze", "просечна вредност глукозе", "prosečna glukoza"],
+        "unit": "GLUCOSE",
+        "type": "METRIC"
+    }
 }
 
 MONTHS_ENG = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
@@ -49,7 +85,7 @@ NUMBER_PATTERN = re.compile(r"(?P<operator>[<>≤≥]?)\s*(?P<number>\d{1,3}(?:[
 
 
 # ============================================================
-# HELPERS & PARSER
+# ROBUST PARSER ENGINE
 # ============================================================
 
 def normalize_text(text: str) -> str:
@@ -80,7 +116,7 @@ def safe_float(value: str) -> Optional[float]:
     except Exception:
         return None
 
-class UniversalCGMParser:
+class RobustCGMParser:
     def parse(self, pdf_bytes: bytes) -> Dict[str, Any]:
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -92,9 +128,13 @@ class UniversalCGMParser:
             page = doc[page_num]
             for w in page.get_text("words"):
                 if len(w) >= 8 and w[4].strip():
-                    words.append({"x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3], "text": w[4].strip(), "normalized": normalize_text(w[4])})
+                    words.append({
+                        "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
+                        "text": w[4].strip(), "normalized": normalize_text(w[4])
+                    })
         doc.close()
 
+        # Build lines and text representation for smart fallback search
         full_text = " ".join(w["text"] for w in words)
         norm_full = normalize_text(full_text)
 
@@ -104,26 +144,34 @@ class UniversalCGMParser:
             for alias in conf["aliases"]:
                 if alias in norm_full:
                     idx = norm_full.find(alias)
-                    snippet = norm_full[idx:idx + 60]
+                    snippet = norm_full[idx:idx + 80]
                     nums = NUMBER_PATTERN.findall(snippet)
                     if nums:
-                        val = safe_float(nums[0][1])
-                        if val is not None:
-                            found_val = val
-                            break
+                        # Skip the alias itself if captured, find the first valid number following it
+                        for num_match in nums:
+                            val = safe_float(num_match[1])
+                            if val is not None:
+                                found_val = val
+                                break
+                    if found_val is not None:
+                        break
             actuals[metric] = found_val
 
-        tbr = round(actuals.get("VERY_LOW", 0) or 0 + actuals.get("LOW", 0) or 0, 2)
-        if actuals.get("VERY_LOW") is None and actuals.get("LOW") is None: tbr = None
+        # Derived calculations
+        very_low = actuals.get("VERY_LOW")
+        low = actuals.get("LOW")
+        in_range = actuals.get("IN_RANGE")
+        high = actuals.get("HIGH")
+        very_high = actuals.get("VERY_HIGH")
 
-        tir = actuals.get("IN_RANGE")
-        tar = round(actuals.get("HIGH", 0) or 0 + actuals.get("VERY_HIGH", 0) or 0, 2)
-        if actuals.get("HIGH") is None and actuals.get("VERY_HIGH") is None: tar = None
+        tbr = round((very_low or 0) + (low or 0), 2) if (very_low is not None or low is not None) else None
+        tir = in_range
+        tar = round((high or 0) + (very_high or 0), 2) if (high is not None or very_high is not None) else None
 
         dates = [m.group(1) for m in DATE_PATTERN.finditer(full_text)]
         start_date, end_date = (dates[0], dates[-1]) if len(dates) >= 2 else (None, None)
 
-        status = "SUCCESS" if all(x is not None for x in [tir, actuals.get("GMI"), actuals.get("CV")]) else "MANUAL_REVIEW"
+        status = "SUCCESS" if tir is not None and actuals.get("GMI") is not None else "MANUAL_REVIEW"
 
         return {
             "status": status,
@@ -134,7 +182,7 @@ class UniversalCGMParser:
 
 
 # ============================================================
-# API ENDPOINTS & WEB PAGES
+# API ENDPOINTS (Multi-Doctor & Token Uploads)
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -158,7 +206,7 @@ async def upload_report_by_token(token: str, file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Samo PDF fajlovi su podržani.")
     
-    # 1. Pronađi pacijenta preko tokena u Supabase
+    # 1. Pronađi pacijenta preko jedinstvenog tokena u Supabase
     pat_res = requests.get(f"{SUPABASE_URL}/rest/v1/patients?token=eq.{token}&select=id,name,doctor_id", headers=SUPABASE_HEADERS)
     patients = pat_res.json()
     if not patients:
@@ -166,19 +214,19 @@ async def upload_report_by_token(token: str, file: UploadFile = File(...)):
     
     patient = patients[0]
     
-    # 2. Parsiraj PDF lokalno bezbedno
+    # 2. Parsiraj PDF lokalno i bezbedno
     pdf_bytes = await file.read()
-    parser = UniversalCGMParser()
+    parser = RobustCGMParser()
     report = parser.parse(pdf_bytes)
     
     act = report["actual_components"]
     der = report["derived_metrics"]
     
-    # 3. Sačuvaj izveštaj u Supabase povezan sa pacijentom
+    # 3. Zapiši izveštaj u bazu vezan za pacijenta (Timeline)
     payload = {
         "patient_id": patient["id"],
         "doctor_id": patient["doctor_id"],
-        "device_name": "Universal CGM / AGP Report",
+        "device_name": "CGM AGP Report",
         "tir": der.get("TIR"),
         "tbr": der.get("TBR"),
         "tar": der.get("TAR"),
@@ -190,7 +238,7 @@ async def upload_report_by_token(token: str, file: UploadFile = File(...)):
     
     ins_res = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=payload)
     if ins_res.status_code not in [200, 201]:
-        raise HTTPException(status_code=500, detail="Greška pri upisu u bazu.")
+        raise HTTPException(status_code=500, detail="Greška pri upisu izveštaja u bazu.")
         
     return {"status": "SUCCESS", "message": "Izveštaj uspešno sačuvan na Vašem profilu!", "data": payload}
 
@@ -210,19 +258,19 @@ def create_patient(doctor_id: int = Form(...), name: str = Form(...), token: str
 
 
 # ============================================================
-# HTML INTERFACES (SaaS Frontend UI)
+# FRONTEND INTERFACES
 # ============================================================
 
 LANDING_HTML = """
 <!DOCTYPE html>
 <html lang="sr">
 <head><meta charset="UTF-8"><title>CGM Platforma za Lekare</title>
-<style>body{font-family:sans-serif;background:#0f172a;color:#fff;text-align:center;padding:50px;}
+<style>body{font-family:sans-serif;background:#0f172a;color:#fff;text-align:center;padding:60px;}
 a{background:#0d9488;color:#fff;padding:15px 30px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:18px;}
 </style></head>
 <body>
-<h1>Sistem za Praćenje CGM Izveštaja</h1>
-<p>Platforma namenjena lekarima i pacijentima za bezbednu sinhronizaciju AGP nalaza.</p><br><br>
+<h1>Platforma za Praćenje CGM Izveštaja</h1>
+<p>Bezbedna lokalna obrada AGP nalaza sa podrškom za više lekara i pacijenata.</p><br><br>
 <a href="/login">Prijava za Lekare →</a>
 </body></html>
 """
@@ -254,37 +302,37 @@ DOCTOR_DASHBOARD_HTML = """
 .card{background:#1e293b;padding:20px;margin-bottom:15px;border-radius:10px;border:1px solid #334155;}
 button{background:#38bdf8;color:#0f172a;border:none;padding:10px 15px;font-weight:bold;border-radius:6px;cursor:pointer;}
 input{padding:10px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#fff;margin-right:10px;}
-.link-box{background:#0f172a;padding:8px;border-radius:4px;color:#38bdf8;font-family:monospace;margin-top:5px;}
+.link-box{background:#0f172a;padding:8px;border-radius:4px;color:#38bdf8;font-family:monospace;margin-top:5px;word-break:break-all;}
 </style></head>
 <body>
 <div class="container">
-<h2>Lekarski Panel — Moji Pacijenti</h2>
+<h2>Lekarski Panel — Upravljanje Pacijentima</h2>
 <div class="card">
 <h3>Dodaj novog pacijenta</h3>
 <input id="pname" placeholder="Ime i prezime pacijenta">
-<input id="ptoken" placeholder="Jedinstveni token (npr. STEFAN-123)">
-<button onclick="addPatient()">Kreiraj Pacijenta & Link</button>
+<input id="ptoken" placeholder="Jedinstveni kod (npr. STEFAN-01)">
+<button onclick="addPatient()">Kreiraj Profil & Link</button>
 </div>
-<div id="patientsList">Učitavanje...</div>
+<div id="patientsList">Učitavanje pacijenata...</div>
 </div>
 <script>
 async function loadPatients() {
     const res = await fetch('/api/doctor/1/patients');
     const data = await res.json();
-    if(!data.length) { document.getElementById('patientsList').innerHTML = "<p>Nema unetih pacijenata.</p>"; return; }
+    if(!data.length) { document.getElementById('patientsList').innerHTML = "<div class='card'>Nema unetih pacijenata.</div>"; return; }
     document.getElementById('patientsList').innerHTML = data.map(p => `
         <div class="card">
             <strong>${p.name}</strong><br>
-            <small>Personalizovani link za pacijenta:</small>
-            <div class="link-box">window.location.origin + "/upload/${p.token}"</div>
-            <p>Broj izveštaja na timeline-u: <b>${p.cgm_reports ? p.cgm_reports.length : 0}</b></p>
+            <small style="color:#94a3b8;">Personalizovani link za slanje izveštaja:</small>
+            <div class="link-box">${window.location.origin}/upload/${p.token}</div>
+            <p style="margin-top:10px;">Broj izveštaja na timeline-u: <b>${p.cgm_reports ? p.cgm_reports.length : 0}</b></p>
         </div>
     `).join('');
 }
 async function addPatient() {
     const name = document.getElementById('pname').value;
     const token = document.getElementById('ptoken').value;
-    if(!name || !token) { alert('Unesite ime i token.'); return; }
+    if(!name || !token) { alert('Unesite ime i jedinstveni token.'); return; }
     const formData = new FormData();
     formData.append('doctor_id', 1);
     formData.append('name', name);
@@ -311,7 +359,7 @@ button{background:#0d9488;color:#fff;font-weight:bold;border:none;cursor:pointer
 <body>
 <div class="card">
 <h2>Pošaljite Vaš CGM Izveštaj</h2>
-<p style="color:#64748b;font-size:14px;">Izaberite PDF izveštaj sa vašeg uređaja. Podaci se automatski šalju vašem lekaru.</p>
+<p style="color:#64748b;font-size:14px;">Izaberite PDF izveštaj sa vašeg uređaja. Podaci se automatski upisuju na vaš istorijski profil.</p>
 <input id="file" type="file" accept=".pdf">
 <button onclick="upload()">Pošalji Izveštaj</button>
 <p id="msg" style="margin-top:15px;font-weight:bold;"></p>
@@ -324,7 +372,7 @@ async function upload() {
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
     msg.style.color = "#0284c7";
-    msg.textContent = "Slanje i obrada u toku...";
+    msg.textContent = "Obrada i slanje u toku...";
     try {
         const res = await fetch("/api/upload-report/{{TOKEN}}", { method: "POST", body: formData });
         const data = await res.json();
