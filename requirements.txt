@@ -3,3 +3,4 @@ uvicorn
 pymupdf
 requests
 pydantic
+python-multipart
