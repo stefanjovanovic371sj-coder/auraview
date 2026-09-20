@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import requests
 import pymupdf as fitz
 import re
@@ -14,21 +14,22 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
+# Primarna ontologija strogih pacijent metrika i komponenti
 METRIC_ONTOLOGY = {
-    "TIR": {
-        "aliases": ["in range", "time in range", "u ciljnom opsegu"],
-        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
-    },
-    "TAR": {
-        "aliases": ["high", "above range", "very high", "iznad opsega"],
-        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
-    },
-    "TBR": {
-        "aliases": ["low", "below range", "very low", "ispod opsega"],
-        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
-    },
     "VERY_LOW": {
         "aliases": ["very low"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "LOW": {
+        "aliases": ["low"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "IN_RANGE": {
+        "aliases": ["in range"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "HIGH": {
+        "aliases": ["high"],
         "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
     },
     "VERY_HIGH": {
@@ -37,7 +38,7 @@ METRIC_ONTOLOGY = {
     },
     "GMI": {
         "aliases": ["glucose management indicator", "gmi", "estimated a1c", "hba1c"],
-        "expected_role": "ACTUAL", "expected_unit": "DECIMAL", "valid_range": (4, 15)
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (4, 15)
     },
     "CV": {
         "aliases": ["glucose variability", "coefficient of variation", "cv"],
@@ -70,13 +71,12 @@ class UniversalCGMParser:
         self._extract_candidates()
         self._extract_anchors()
         self._associate_labels_and_values()
-        self._aggregate_metrics()
-        self._validate_cluster()
+        self._derive_standardized_metrics()
         self._extract_reporting_period()
         return self._generate_final_report()
 
     def _ingest_pdf(self):
-        """1. RAW PyMuPDF Extraction sa očuvanjem originalnog redosleda tokena."""
+        # 1. RAW PDF EXTRACTION
         for page_num, page in enumerate(self.doc):
             words_raw = page.get_text("words")
             page_words = []
@@ -98,12 +98,9 @@ class UniversalCGMParser:
             })
 
     def _build_layout(self):
-        """2. Dokument -> Page -> Block -> Line -> Token hijerarhija bez uništavanja raw ordra."""
         region_counter = 0
         for page in self.pages:
-            # Derivirani geometrijski pogled za linije i regije (ne dira raw_words)
             sorted_words = sorted(page["raw_words"], key=lambda w: (w["y0"], w["x0"]))
-            
             lines_map = {}
             for w in sorted_words:
                 line_key = (w["block"], w["line"])
@@ -111,11 +108,9 @@ class UniversalCGMParser:
                     lines_map[line_key] = []
                 lines_map[line_key].append(w)
             
-            # Formiranje linija iz mapiranih tokena
             lines = list(lines_map.values())
             lines.sort(key=lambda l: l[0]["y0"])
 
-            # Grupisanje linija u vizuelne regione (blokove)
             current_region_lines = []
             for line in lines:
                 if not current_region_lines:
@@ -153,21 +148,33 @@ class UniversalCGMParser:
         })
 
     def _classify_regions(self):
-        """Određivanje regionalnog konteksta (GOAL_ZONE vs ACTUAL_ZONE)."""
         for r in self.regions:
-            if any(k in r["text"] for k in ["goal", "goals", "target range 3.9", "cilj", "glucose ranges goals"]):
+            if any(k in r["text"] for k in ["goal", "goals", "target", "recommended", "reference", "desired", "clinical target"]):
                 r["context_type"] = "GOAL_ZONE"
             elif any(k in r["text"] for k in ["in range", "very low", "low", "high", "very high"]):
                 r["context_type"] = "ACTUAL_ZONE"
 
+    def _is_descriptive_context(self, line_text):
+        """Precizna identifikacija deskriptivnih konteksta (medijana, percentila, osa, formula)."""
+        lower = line_text.lower()
+        if "median" in lower or "percentile" in lower or "min" in lower:
+            return True
+        if "of time in ranges" in lower or "=" in line_text:
+            return True
+        if re.search(r'\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b', line_text):
+            return True
+        return False
+
     def _extract_candidates(self):
-        """Precizno vezivanje numeričkog kandidata za STVARNE tokene i njihove bbox-ove."""
         for r in self.regions:
             for line in r["lines"]:
                 line_text = " ".join([w["text"] for w in line])
                 line_text_lower = line_text.lower()
                 
-                # Pretraga brojeva sa opcionalnim operatorima i procentima
+                # Filtriranje deskriptivnih konteksta umesto glupog brisanja svih zagrada
+                if self._is_descriptive_context(line_text):
+                    continue
+
                 matches = re.finditer(r'([<>]?)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(%)?', line_text)
                 for match in matches:
                     operator = match.group(1)
@@ -175,45 +182,44 @@ class UniversalCGMParser:
                     has_percent = bool(match.group(3))
                     val = float(val_str.replace(',', '.'))
                     
-                    # Pronalaženje tačnih reči/tokena koji čine ovaj broj u liniji
-                    matched_words = [w for w in line if val_str in w["text"] or (has_percent and "%" in w["text"]) or w["text"] in [operator, val_str, val_str+"%"]]
+                    matched_words = [w for w in line if val_str in w["text"] or (has_percent and "%" in w["text"])]
                     if not matched_words:
-                        matched_words = line # fallback na celu liniju ako token nije izlolovan
+                        matched_words = line
                     
                     bx0 = min(w["x0"] for w in matched_words)
                     by0 = min(w["y0"] for w in matched_words)
                     bx1 = max(w["x1"] for w in matched_words)
                     by1 = max(w["y1"] for w in matched_words)
                     
-                    # Semantic role classification
                     role = "UNKNOWN"
                     reason = []
                     
-                    if operator:
+                    if operator or any(k in line_text_lower for k in ["goal", "target", "recommended", "reference", "desired", "clinical target"]):
                         role = "GOAL"
-                        reason.append("GOAL_OPERATOR_DETECTED")
-                    elif "goal" in line_text_lower or "target range" in line_text_lower:
-                        role = "GOAL"
-                        reason.append("INLINE_GOAL_CONTEXT")
+                        reason.append("GOAL_OR_REFERENCE_CONTEXT")
                     elif r["context_type"] == "GOAL_ZONE":
                         role = "GOAL"
-                        reason.append("REGION_GOAL_CONTEXT")
-                    elif r["context_type"] == "ACTUAL_ZONE" or not operator:
+                        reason.append("GOAL_ZONE_CONTEXT")
+                    elif r["context_type"] == "ACTUAL_ZONE":
                         role = "ACTUAL"
-                        reason.append("ACTUAL_ZONE_CONTEXT" if r["context_type"] == "ACTUAL_ZONE" else "DEFAULT_ACTUAL")
+                        reason.append("ACTUAL_ZONE_MATCH")
+                    else:
+                        # Broj bez operatora i bez eksplicitnog konteksta NIJE automatski patient result
+                        role = "UNKNOWN"
+                        reason.append("UNVERIFIED_CONTEXT_UNKNOWN")
                     
-                    self.candidates.append({
-                        "raw_text": match.group(0),
-                        "value": val,
-                        "unit": "%" if has_percent else "DECIMAL",
-                        "type": "PERCENT" if has_percent else "DECIMAL",
-                        "semantic_role": role,
-                        "bbox": {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1, "cx": (bx0+bx1)/2, "cy": (by0+by1)/2},
-                        "page": line[0]["page"],
-                        "region_id": r["region_id"],
-                        "reason_codes": reason,
-                        "line_text": line_text_lower
-                    })
+                    if role != "UNKNOWN":
+                        self.candidates.append({
+                            "raw_text": match.group(0),
+                            "value": val,
+                            "unit": "%" if has_percent else "DECIMAL",
+                            "semantic_role": role,
+                            "bbox": {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1, "cx": (bx0+bx1)/2, "cy": (by0+by1)/2},
+                            "page": line[0]["page"],
+                            "region_id": r["region_id"],
+                            "reason_codes": reason,
+                            "line_text": line_text_lower
+                        })
 
     def _extract_anchors(self):
         for r in self.regions:
@@ -237,12 +243,12 @@ class UniversalCGMParser:
                                 })
 
     def _associate_labels_and_values(self):
-        """Povezivanje labela i vrednosti preko uloga, regiona i preciznih bbox-ova."""
+        """Stroga semantička kompatibilnost uz prostornu proveru."""
         for anchor in self.anchors:
             valid_candidates = []
             for c in self.candidates:
                 if c["page"] != anchor["page"]: continue
-                if anchor["expected_role"] == "ACTUAL" and c["semantic_role"] == "GOAL": continue
+                if c["semantic_role"] != "ACTUAL": continue
                 if c["unit"] != anchor["expected_unit"]: continue
                 
                 v_min, v_max = METRIC_ONTOLOGY[anchor["metric"]]["valid_range"]
@@ -251,15 +257,15 @@ class UniversalCGMParser:
                 y_diff = abs(c["bbox"]["cy"] - anchor["cy"])
                 x_diff = abs(c["bbox"]["cx"] - anchor["cx"])
                 
-                # Restriktivno mapiranje unutar istog regiona ili bliske linije
-                if y_diff < 35 or (c["region_id"] == anchor["region_id"] and y_diff < 60):
-                    score = 0.6
-                    evidence = ["ROLE_MATCH", "UNIT_MATCH"]
-                    if y_diff < 15: 
+                # Osnovni uslov: semantička kompatibilnost + bliska blizina unutar regije
+                if y_diff < 30 and (c["region_id"] == anchor["region_id"] or x_diff < 150):
+                    score = 0.7
+                    evidence = ["SEMANTIC_AND_UNIT_MATCH"]
+                    if y_diff < 12: 
                         score += 0.2
                         evidence.append("CLOSE_VERTICAL_PROXIMITY")
                     if c["region_id"] == anchor["region_id"]:
-                        score += 0.2
+                        score += 0.1
                         evidence.append("SAME_REGION")
                         
                     valid_candidates.append({
@@ -272,8 +278,18 @@ class UniversalCGMParser:
             if valid_candidates:
                 valid_candidates.sort(key=lambda x: (-x["score"], x["distance"]))
                 best = valid_candidates[0]
-                current_result = self.results[anchor["metric"]]
                 
+                # Ambiguitet check
+                if len(valid_candidates) > 1 and (best["score"] - valid_candidates[1]["score"] < 0.1):
+                    self.results[anchor["metric"]] = {
+                        "value": None, "confidence": best["score"], "status": "MANUAL_REVIEW",
+                        "semantic_role": "UNKNOWN", "page": anchor["page"],
+                        "source": {"label_text": anchor["raw_text"], "region_id": best["candidate"]["region_id"]},
+                        "reason_codes": ["AMBIGUOUS_CANDIDATES_MANUAL_REVIEW"]
+                    }
+                    continue
+
+                current_result = self.results[anchor["metric"]]
                 if not current_result or best["score"] > current_result["confidence"]:
                     self.results[anchor["metric"]] = {
                         "value": best["candidate"]["value"],
@@ -291,35 +307,33 @@ class UniversalCGMParser:
                         "reason_codes": best["evidence"] + best["candidate"]["reason_codes"]
                     }
 
-    def _aggregate_metrics(self):
-        """Agregacija komponenti u skladu sa zahtevom (TBR = Very low + Low, TAR = High + Very high)."""
-        # TBR agregacija
-        tbr_res = self.results["TBR"]
-        vl_res = self.results["VERY_LOW"]
-        if vl_res and tbr_res and vl_res["value"] is not None and tbr_res["value"] is not None:
-            if vl_res["source"]["region_id"] == tbr_res["source"]["region_id"]:
-                self.results["TBR"]["value"] = round(vl_res["value"] + tbr_res["value"], 1)
-                self.results["TBR"]["reason_codes"].append("AGGREGATED_VERY_LOW_AND_LOW")
+    def _derive_standardized_metrics(self):
+        """2. DERIVED STANDARDIZED METRICS iz Actual Range Breakdown-a."""
+        self.derived_metrics = {}
+        
+        vl = self.results.get("VERY_LOW")
+        low = self.results.get("LOW")
+        in_range = self.results.get("IN_RANGE")
+        high = self.results.get("HIGH")
+        vh = self.results.get("VERY_HIGH")
 
-        # TAR agregacija
-        tar_res = self.results["TAR"]
-        vh_res = self.results["VERY_HIGH"]
-        if vh_res and tar_res and vh_res["value"] is not None and tar_res["value"] is not None:
-            if vh_res["source"]["region_id"] == tar_res["source"]["region_id"]:
-                self.results["TAR"]["value"] = round(vh_res["value"] + tar_res["value"], 1)
-                self.results["TAR"]["reason_codes"].append("AGGREGATED_HIGH_AND_VERY_HIGH")
+        # TBR = Very Low + Low
+        if vl and low and vl.get("value") is not None and low.get("value") is not None:
+            self.derived_metrics["TBR"] = round(vl["value"] + low["value"], 1)
+        else:
+            self.derived_metrics["TBR"] = None
 
-    def _validate_cluster(self):
-        tir = self.results["TIR"]
-        tar = self.results["TAR"]
-        tbr = self.results["TBR"]
-        if tir and tar and tbr and all(v and v["value"] is not None for v in [tir, tar, tbr]):
-            total = tir["value"] + tar["value"] + tbr["value"]
-            if 98 <= total <= 102:
-                for metric in [tir, tar, tbr]:
-                    metric["confidence"] = min(1.0, metric["confidence"] + 0.1)
-                    metric["status"] = "OK"
-                    metric["reason_codes"].append("VALIDated_BY_CLUSTER_SUM_100")
+        # TIR = In Range
+        if in_range and in_range.get("value") is not None:
+            self.derived_metrics["TIR"] = in_range["value"]
+        else:
+            self.derived_metrics["TIR"] = None
+
+        # TAR = High + Very High
+        if high and vh and high.get("value") is not None and vh.get("value") is not None:
+            self.derived_metrics["TAR"] = round(high["value"] + vh["value"], 1)
+        else:
+            self.derived_metrics["TAR"] = None
 
     def _extract_reporting_period(self):
         date_pattern = r'\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b'
@@ -332,27 +346,28 @@ class UniversalCGMParser:
                 break
 
     def _generate_final_report(self):
-        final_metrics = {}
+        actual_metrics = {}
         for key, res in self.results.items():
-            if key in ["VERY_LOW", "VERY_HIGH"]: continue
-            if res: 
-                final_metrics[key] = res
-            else: 
-                final_metrics[key] = {
-                    "value": None,
-                    "confidence": 0.0,
-                    "status": "MANUAL_REVIEW",
-                    "semantic_role": "UNKNOWN",
-                    "reason_codes": ["NOT_FOUND_OR_UNCERTAIN"]
-                }
+            if res and res.get("value") is not None:
+                actual_metrics[key] = res["value"]
+            else:
+                actual_metrics[key] = None
+
         return {
             "status": "SUCCESS",
-            "manufacturer": "Unknown",
             "reporting_period": self.reporting_period,
-            "metrics": final_metrics
+            "actual_components": actual_metrics,
+            "derived_metrics": self.derived_metrics
         }
 
-# --- PRODUKCIONE RUTE (Netaknute) ---
+# --- TEST ENDPOINT ZA PROVERU PRE SLANJA U BAZU ---
+@app.post("/debug-parser-test")
+async def debug_parser_test(file: UploadFile = File(...)):
+    content = await file.read()
+    doc = fitz.open(stream=content, filetype="pdf")
+    parser = UniversalCGMParser(doc)
+    report = parser.parse()
+    return JSONResponse(content=report)
 
 @app.post("/upload")
 async def upload_report(file: UploadFile = File(...)):
@@ -360,24 +375,22 @@ async def upload_report(file: UploadFile = File(...)):
     doc = fitz.open(stream=content, filetype="pdf")
     patient_id = "P-000127"
     
-    patient_check = requests.get(f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}", headers=SUPABASE_HEADERS)
-    if not patient_check.json():
-        requests.post(f"{SUPABASE_URL}/rest/v1/patients", headers=SUPABASE_HEADERS, json={"patient_id": patient_id, "name": "Stefan Jovanović"})
-    
     parser = UniversalCGMParser(doc)
     extracted = parser.parse()
     
-    metrics = extracted["metrics"]
+    actuals = extracted["actual_components"]
+    derived = extracted["derived_metrics"]
+    
     parsed_data = {
         "patient_id": patient_id, 
-        "device_name": "CGM Izveštaj", 
-        "manufacturer": "mySugr / Standardni CGM",
-        "tir": metrics["TIR"]["value"] if metrics["TIR"] else None, 
-        "tbr": metrics["TBR"]["value"] if metrics["TBR"] else None, 
-        "tar": metrics["TAR"]["value"] if metrics["TAR"] else None,
-        "gmi_percent": metrics["GMI"]["value"] if metrics["GMI"] else None, 
-        "cv": metrics["CV"]["value"] if metrics["CV"] else None, 
-        "active_time": str(metrics["ACTIVE_TIME"]["value"]) + "%" if metrics["ACTIVE_TIME"] and metrics["ACTIVE_TIME"]["value"] is not None else None
+        "device_name": "mySugr AGP Izveštaj", 
+        "manufacturer": "mySugr",
+        "tir": derived.get("TIR"), 
+        "tbr": derived.get("TBR"), 
+        "tar": derived.get("TAR"),
+        "gmi_percent": actuals.get("GMI"), 
+        "cv": actuals.get("CV"), 
+        "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None
     }
     
     response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
@@ -386,55 +399,25 @@ async def upload_report(file: UploadFile = File(...)):
         
     return {"status": "success", "data": parsed_data, "engine_report": extracted}
 
-@app.get("/api/reports")
-def get_reports():
-    return requests.get(f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc", headers=SUPABASE_HEADERS).json()
-
 @app.get("/", response_class=HTMLResponse)
 def patient_form():
     return """
 <!DOCTYPE html>
-<html lang="sr"><head><meta charset="UTF-8"><title>Aura View</title></head>
-<body style="font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#f4f6f9;">
-<div style="background:white; padding:30px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); width:100%; max-width:400px; text-align:center;">
-<h2>Slanje AGP Izveštaja</h2>
-<form id="f"><input type="file" id="fi" accept=".pdf" required style="margin:20px 0;"><br>
-<button type="submit" style="background:#0d9488; color:white; border:none; padding:12px 20px; border-radius:6px; width:100%; font-weight:bold; cursor:pointer;">Pošalji Lekaru</button></form>
-<p id="s" style="margin-top:15px; font-weight:500;"></p></div>
+<html lang="sr"><head><meta charset="UTF-8"><title>Parser Test Mode</title></head>
+<body style="font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#0f172a; color:#f8fafc;">
+<div style="background:#1e293b; padding:30px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.3); width:100%; max-width:450px;">
+<h2>CGM Parser Test Mode</h2>
+<form id="f"><input type="file" id="fi" accept=".pdf" required style="margin:20px 0; color:#cbd5e1;"><br>
+<button type="submit" style="background:#0d9488; color:white; border:none; padding:12px 20px; border-radius:6px; width:100%; font-weight:bold; cursor:pointer;">Testiraj Izveštaj</button></form>
+<pre id="s" style="margin-top:15px; font-size:11px; max-height:250px; overflow:auto; background:#030712; padding:10px; border-radius:6px; color:#34d399;"></pre></div>
 <script>
 document.getElementById('f').onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(); fd.append('file', document.getElementById('fi').files[0]);
-    document.getElementById('s').innerText = "Obrada u toku...";
-    const res = await fetch('/upload', { method: 'POST', body: fd });
-    if(res.ok) document.getElementById('s').innerText = "Izveštaj uspešno sačuvan!";
-    else document.getElementById('s').innerText = "Greška pri obradi.";
-};
-</script></body></html>
-"""
-
-@app.get("/dashboard", response_class=HTMLResponse)
-def doctor_dashboard():
-    return """
-<!DOCTYPE html><html lang="sr"><head><meta charset="UTF-8"><title>Panel</title></head>
-<body style="background:#0f172a; color:#f8fafc; padding:20px;">
-<h2>Dr Marko Jovanović — Live Panel</h2>
-<div id="c">Učitavanje vreme...</div>
-<script>
-async function load() {
-    const res = await fetch('/api/reports');
+    document.getElementById('s').innerText = "Analiza u toku...";
+    const res = await fetch('/debug-parser-test', { method: 'POST', body: fd });
     const data = await res.json();
-    document.getElementById('c').innerHTML = data.map(r => `<div style="background:#1e293b; padding:15px; margin-bottom:10px; border-radius:8px; border:1px solid #334155;">
-    <strong>Pacijent: ${r.patient_id}</strong> — <span style="color:#38bdf8;">${r.device_name || 'CGM'}</span><br><br>
-    TIR: <span style="color:#4ade80; font-size:20px; font-weight:bold;">${r.tir !== null ? r.tir + '%' : '-'}</span> | 
-    TBR: <span style="color:#f87171;">${r.tbr !== null ? r.tbr + '%' : '-'}</span> | 
-    TAR: <span style="color:#fbbf24;">${r.tar !== null ? r.tar + '%' : '-'}</span> | 
-    GMI: ${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'} | 
-    CV: ${r.cv !== null ? r.cv + '%' : '-'} | 
-    Aktivno: ${r.active_time || '-'}
-    </div>`).join('');
-}
-load();
-setInterval(load, 5000);
+    document.getElementById('s').innerText = JSON.stringify(data, null, 2);
+};
 </script></body></html>
 """
