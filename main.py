@@ -14,43 +14,100 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
-def extract_cgm_data(full_text):
-    text = re.sub(r"\s+", " ", full_text).strip()
+# Univerzalni semantički rečnik
+SEMANTIC_MAP = {
+    "TIR": ["time in range", "u ciljnom opsegu", "target range", "in range", "within range", "ciljni opseg"],
+    "TAR": ["time above range", "above range", "iznad opsega", "high", "visoko", "iznad ciljnog"],
+    "TBR": ["time below range", "below range", "ispod opsega", "low", "nisko", "ispod ciljnog"],
+    "GMI": ["gmi", "glucose management indicator", "estimated a1c", "hba1c", "procenjeni a1c", "procijenjeni a1c"],
+    "CV":  ["cv", "coefficient of variation", "varijabilnost", "glycemic variability"]
+}
 
-    def get_val(anchors, is_gmi=False):
-        anchor_pattern = "|".join(re.escape(a) for a in anchors)
-        
-        # Gledamo do 200 karaktera unapred u sortiranom tekstu
-        if is_gmi:
-            # GMI je specifičan broj (npr 6.5)
-            pattern = re.compile(rf"(?i)({anchor_pattern}).{{0,200}}?([4-9][.,][0-9]|1[0-4][.,][0-9])\s*%?")
-        else:
-            # Ostali su standardni procenti
-            pattern = re.compile(rf"(?i)({anchor_pattern}).{{0,200}}?([0-9]{{1,3}}(?:[.,][0-9])?)\s*%")
+def extract_cgm_data_visual(doc):
+    """
+    Vizuelni parser: vadi reči sa koordinatama, spaja ih u redove i traži parove labela-broj
+    """
+    all_words = []
+    for page_num, page in enumerate(doc):
+        # get_text("words") -> (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        words = page.get_text("words")
+        for w in words:
+            all_words.append({
+                "text": w[4], "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3]
+            })
             
-        match = pattern.search(text)
-        if match:
-            try:
-                val = float(match.group(2).replace(",", "."))
-                if 0 <= val <= 100:
-                    return val
-            except:
-                pass
-        return None
-
-    tir = get_val(["Time in Range", "U ciljnom opsegu", "U ciljanom opsegu", "Target range", "In range", "Ciljni opseg"])
-    tbr = get_val(["Time Below Range", "Below range", "Ispod opsega", "Nisko", "Low", "Ispod ciljnog"])
-    tar = get_val(["Time Above Range", "Above range", "Iznad opsega", "Visoko", "High", "Iznad ciljnog"])
-    gmi = get_val(["GMI", "Glucose Management Indicator", "Estimated A1c", "Procijenjeni A1c", "Procenjeni A1c"], is_gmi=True)
-    cv = get_val(["Coefficient of Variation", "CV", "Varijabilnost", "Glycemic Variability"])
-
-    return {
-        "tir_percent": tir,
-        "tbr_percent": tbr,
-        "tar_percent": tar,
-        "gmi_percent": gmi,
-        "cv_percent": cv
+    # Sortiramo po Y osi (redovi odozgo na dole) pa po X osi (sleva na desno)
+    all_words.sort(key=lambda w: (w["y0"], w["x0"]))
+    
+    # Grupisanje u vizuelne redove
+    lines = []
+    if all_words:
+        current_line = [all_words[0]]
+        for word in all_words[1:]:
+            last_word = current_line[-1]
+            # Ako je Y koordinata unutar 5 piksela, računamo da je isti red
+            if abs(word["y0"] - last_word["y0"]) < 5:
+                current_line.append(word)
+            else:
+                lines.append(current_line)
+                current_line = [word]
+        lines.append(current_line)
+        
+    results = {
+        "TIR": None, "TAR": None, "TBR": None, "GMI": None, "CV": None
     }
+    
+    # Pretraga za svaku metriku
+    for i, line in enumerate(lines):
+        line_text = " ".join([w["text"] for w in line]).lower()
+        
+        for metric, aliases in SEMANTIC_MAP.items():
+            if results[metric] is not None:
+                continue # Već smo našli vrednost
+                
+            for alias in aliases:
+                if alias in line_text:
+                    # Našli smo labelu, tražimo broj (u istom redu ili redu ispod)
+                    is_gmi = metric == "GMI"
+                    
+                    # 1. Traži u istom redu
+                    orig_line = " ".join([w["text"] for w in line])
+                    val = _extract_number(orig_line, is_gmi)
+                    
+                    # 2. Ako nema u istom redu, traži u redu ispod (čest dizajn kod AGP)
+                    if val is None and i + 1 < len(lines):
+                        next_line = " ".join([w["text"] for w in lines[i+1]])
+                        val = _extract_number(next_line, is_gmi)
+                        
+                    if val is not None:
+                        results[metric] = val
+                    break
+
+    # Matematička validacija/korekcija ako fali neka osnovna AGP vrednost (3 vrednosti daju 100)
+    # Ovo spašava stvar ako je prepoznao TIR i TAR, a TBR je zabačen.
+    tir, tar, tbr = results["TIR"], results["TAR"], results["TBR"]
+    if tir is not None and tar is not None and tbr is None and (tir + tar <= 100):
+        results["TBR"] = round(100.0 - tir - tar, 1)
+    elif tir is not None and tbr is not None and tar is None and (tir + tbr <= 100):
+        results["TAR"] = round(100.0 - tir - tbr, 1)
+        
+    return results
+
+def _extract_number(text, is_gmi):
+    if is_gmi:
+        match = re.search(r'(\d{1,2}[.,]\d{1,2})\s*%?', text)
+    else:
+        match = re.search(r'(\d{1,3}(?:\.\d{1,2})?)\s*%', text)
+        
+    if match:
+        val = float(match.group(1).replace(',', '.'))
+        # Logička provera za TIR/TAR/TBR (ne može preko 100%)
+        if not is_gmi and 0 <= val <= 100:
+            return val
+        # Logička provera za GMI (A1c je obično između 4 i 15)
+        if is_gmi and 4 <= val <= 15:
+            return val
+    return None
 
 @app.get("/api/reports")
 def get_reports():
@@ -119,19 +176,8 @@ async def upload_report(file: UploadFile = File(...)):
     content = await file.read()
     doc = fitz.open(stream=content, filetype="pdf")
     
-    # TAJNA ZA PDF: Ekstrakcija i sortiranje vizuelnih blokova (odozgo na dole, sleva na desno)
-    blocks = []
-    for page in doc:
-        for b in page.get_text("blocks"):
-            blocks.append(b)
-            
-    # Sortiramo po Y osi, pa po X osi
-    blocks.sort(key=lambda b: (b[1], b[0]))
-    full_text = " ".join([b[4] for b in blocks if isinstance(b[4], str)])
-    
+    # Provera pacijenta
     patient_id = "P-000127"
-    
-    # Provera pacijenta u bazi
     patient_check = requests.get(
         f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
         headers=SUPABASE_HEADERS
@@ -143,10 +189,10 @@ async def upload_report(file: UploadFile = File(...)):
             json={"patient_id": patient_id, "name": "Stefan Jovanović"}
         )
 
-    # Izvršavanje pametne ekstrakcije na lepo sortiranom tekstu
-    extracted = extract_cgm_data(full_text)
+    # 🚀 Pokretanje našeg VIZUELNOG parsera
+    extracted = extract_cgm_data_visual(doc)
 
-    # Čišćenje imena proizvođača i fajla za lepši prikaz na frontendu
+    # Lepša detekcija imena proizvođača/uređaja
     fname = file.filename.lower()
     if "mysugr" in fname:
         manuf = "mySugr"
@@ -158,19 +204,20 @@ async def upload_report(file: UploadFile = File(...)):
         manuf = "Abbott"
         dname = "FreeStyle Libre AGP"
     else:
-        manuf = "Standardni CGM"
+        manuf = "Univerzalni CGM"
         dname = "CGM Izveštaj"
 
-    # Koristimo nule umesto null ako neki podatak slučajno ne postoji, da ne pukne prikaz
+    # Ako parser iz nekog razloga ipak vrati None (da ne bi pucao frontend), prosleđujemo null Supabase-u.
+    # Frontend iz dashboard-a će elegantno prepoznati null i prikazati "-" (crticu).
     parsed_data = {
         "patient_id": patient_id,
         "device_name": dname,
         "manufacturer": manuf,
-        "tir": extracted["tir_percent"] if extracted["tir_percent"] is not None else 0.0,
-        "tbr": extracted["tbr_percent"] if extracted["tbr_percent"] is not None else 0.0,
-        "tar": extracted["tar_percent"] if extracted["tar_percent"] is not None else 0.0,
-        "gmi_percent": extracted["gmi_percent"] if extracted["gmi_percent"] is not None else 0.0,
-        "cv": extracted["cv_percent"] if extracted["cv_percent"] is not None else 0.0,
+        "tir": extracted["TIR"],
+        "tbr": extracted["TBR"],
+        "tar": extracted["TAR"],
+        "gmi_percent": extracted["GMI"],
+        "cv": extracted["CV"],
         "active_time": "100%"
     }
     
