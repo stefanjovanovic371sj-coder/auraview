@@ -213,7 +213,7 @@ class UniversalCGMParser:
                 for m_key, m_data in METRIC_ONTOLOGY.items():
                     for alias in m_data["aliases"]:
                         if alias in line_text:
-                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 15 for a in self.anchors):
+                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 20 for a in self.anchors):
                                 self.anchors.append({
                                     "metric": m_key,
                                     "expected_role": m_data["expected_role"],
@@ -306,7 +306,6 @@ class UniversalCGMParser:
             "reporting_period": self.reporting_period,
             "actual_components": actual_metrics,
             "derived_metrics": self.derived_metrics,
-            # Debug vizuelni sloj (prikazuje kompletne raw podatke)
             "debug_raw_data": {
                 "total_pages": len(self.pages),
                 "pages": [{
@@ -314,7 +313,7 @@ class UniversalCGMParser:
                     "width": p["width"],
                     "height": p["height"],
                     "word_count": len(p["raw_words"]),
-                    "words": p["raw_words"][:100] # Prvih 100 reči sa koordinatama za pregled
+                    "words": p["raw_words"][:100]
                 } for p in self.pages],
                 "extracted_candidates": self.candidates,
                 "detected_anchors": self.anchors
