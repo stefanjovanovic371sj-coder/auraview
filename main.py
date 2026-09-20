@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 import fitz  # PyMuPDF
 import re
 import math
@@ -27,12 +27,12 @@ MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app = FastAPI(
     title="Universal CGM AGP Parser",
-    version="2.0.2"
+    version="2.1.1"
 )
 
 
 # ============================================================
-# METRIC DEFINITIONS
+# METRIC DEFINITIONS (Universal aliases for Linx, Abbott, mySugr)
 # ============================================================
 
 Metrics = {
@@ -40,7 +40,8 @@ Metrics = {
     "VERY_LOW": {
         "aliases": [
             "very low",
-            "very-low"
+            "very-low",
+            "tbr (<3.9)"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -48,7 +49,8 @@ Metrics = {
 
     "LOW": {
         "aliases": [
-            "low"
+            "low",
+            "tbr"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -58,7 +60,9 @@ Metrics = {
         "aliases": [
             "in range",
             "in-range",
-            "time in range"
+            "time in range",
+            "normal",
+            "tir"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -66,7 +70,8 @@ Metrics = {
 
     "HIGH": {
         "aliases": [
-            "high"
+            "high",
+            "tar"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -95,6 +100,8 @@ Metrics = {
             "glucose variability",
             "coefficient of variation",
             "percent coefficient of variation",
+            "gv (cv)",
+            "gv",
             "cv"
         ],
         "unit": "%",
@@ -107,7 +114,9 @@ Metrics = {
             "time cgM active",
             "cgm active",
             "active time",
-            "sensor active"
+            "sensor active",
+            "cgm coverage time",
+            "coverage time"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -116,7 +125,9 @@ Metrics = {
     "AVG_GLUCOSE": {
         "aliases": [
             "average glucose",
-            "mean glucose"
+            "mean glucose",
+            "mbg",
+            "mean blood glucose"
         ],
         "unit": "GLUCOSE",
         "type": "METRIC"
@@ -201,16 +212,6 @@ def bbox_center(bbox: List[float]) -> Tuple[float, float]:
     return (
         (bbox[0] + bbox[2]) / 2,
         (bbox[1] + bbox[3]) / 2
-    )
-
-
-def bbox_distance(a: List[float], b: List[float]) -> float:
-    ax, ay = bbox_center(a)
-    bx, by = bbox_center(b)
-
-    return math.sqrt(
-        ((ax - bx) ** 2) +
-        ((ay - by) ** 2)
     )
 
 
@@ -304,7 +305,11 @@ class UniversalCGMParser:
         except Exception as e:
             raise ValueError(f"Cannot open PDF: {str(e)}")
 
-        for page_number, page in enumerate(document):
+        # Čitamo maksimalno prve 2 stranice (gde su zbirni parametri)
+        max_pages = min(2, len(document))
+
+        for page_number in range(max_pages):
+            page = document[page_number]
             page_words = page.get_text("words")
             self.pages.append({
                 "page": page_number + 1,
@@ -445,7 +450,7 @@ class UniversalCGMParser:
 
                 bbox = bbox_union(token_boxes) if token_boxes else line["bbox"]
 
-                is_goal_line = any(term in normalized for term in ["goal:", "target range", "above 10.0", "below 3.9", ">70%", "<25%", "<4%"])
+                is_goal_line = any(term in normalized for term in ["goal:", "target range", "reference value", "above 10.0", "below 3.9", ">70%", "<25%", "<4%"])
                 context = "GOAL" if (is_goal_line or operator) else "ACTUAL_RANGE"
 
                 if context == "GOAL":
@@ -568,7 +573,7 @@ class UniversalCGMParser:
                     continue
                 dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                 dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                if dy > 120:
+                if dy > 150:
                     continue
                 score = dy + (dx * 0.25)
                 if anchor["region_id"] == candidate["region_id"]:
@@ -583,7 +588,7 @@ class UniversalCGMParser:
         for pair in pairs:
             metric = pair["metric"]
             candidate_id = pair["candidate_id"]
-            if metric in used_metrics or candidate_id in used_candidates or pair["score"] > 150:
+            if metric in used_metrics or candidate_id in used_candidates or pair["score"] > 180:
                 continue
 
             result[metric] = pair["value"]
@@ -621,7 +626,7 @@ class UniversalCGMParser:
 
                     dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                     dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                    if dy > 150:
+                    if dy > 180:
                         continue
 
                     score = dy + dx * 0.20
@@ -727,7 +732,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     parsed_data = {
         "patient_id": patient_id,
         "device_name": "Universal CGM Report",
-        "manufacturer": "mySugr / AGP",
+        "manufacturer": "Linx / Abbott / Universal",
         "tir": derived.get("TIR"),
         "tbr": derived.get("TBR"),
         "tar": derived.get("TAR"),
@@ -736,7 +741,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
     }
     
-    # Slanje u Supabase bazu
     try:
         requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data, timeout=10)
     except Exception:
