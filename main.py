@@ -2,7 +2,7 @@ import os
 import re
 import json
 import requests
-import fitz  # PyMuPDF
+import fitz  
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
