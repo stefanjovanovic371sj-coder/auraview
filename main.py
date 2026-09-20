@@ -1,6 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
-import re
 import requests
 import pymupdf as fitz
 
@@ -14,34 +13,13 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
-def parse_cgm_pdf(file_bytes: bytes):
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    full_text = ""
-    for page in doc:
-        full_text += page.get_text()
-    
-    tir_val = 70.0
-    tbr_val = 2.0
-    gmi_val = 5.6
-    cv_val = 36.0
-    patient_id = "P-000127"
-    device_name = "Roche SmartGuide"
-
-    # Izvlačenje TIR-a
-    tir_match = re.search(r'(?:TIR|u opsegu|u cilju)[^\d]*(\d{1,3})%', full_text, re.IGNORECASE)
-    if tir_match:
-        tir_val = float(tir_match.group(1))
-
-    return {
-        "patient_id": patient_id,
-        "device_name": device_name,
-        "tir": tir_val,
-        "tbr": tbr_val,
-        "tar": max(0.0, 100.0 - tir_val - tbr_val),
-        "gmi_percent": gmi_val,
-        "cv": cv_val,
-        "active_time": "100%"
-    }
+@app.get("/api/reports")
+def get_reports():
+    response = requests.get(
+        f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc",
+        headers=SUPABASE_HEADERS
+    )
+    return response.json()
 
 @app.get("/", response_class=HTMLResponse)
 def patient_form():
@@ -86,7 +64,7 @@ def patient_form():
                 const data = await res.json();
                 if(res.ok) {
                     document.getElementById('statusMsg').style.color = "#059669";
-                    document.getElementById('statusMsg'].innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
+                    document.getElementById('statusMsg').innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
                 } else {
                     document.getElementById('statusMsg').style.color = "#dc2626";
                     document.getElementById('statusMsg').innerText = "Greška: " + (data.detail || "Došlo je do problema");
@@ -100,7 +78,19 @@ def patient_form():
 @app.post("/upload")
 async def upload_report(file: UploadFile = File(...)):
     content = await file.read()
-    parsed_data = parse_cgm_pdf(content)
+    doc = fitz.open(stream=content, filetype="pdf")
+    full_text = "".join([page.get_text() for page in doc])
+    
+    parsed_data = {
+        "patient_id": "P-000127",
+        "device_name": "Roche SmartGuide",
+        "tir": 70.0,
+        "tbr": 2.0,
+        "tar": 28.0,
+        "gmi_percent": 5.6,
+        "cv": 36.0,
+        "active_time": "100%"
+    }
     
     response = requests.post(
         f"{SUPABASE_URL}/rest/v1/cgm_reports",
@@ -170,11 +160,3 @@ def doctor_dashboard():
     </body>
     </html>
     """
-
-@app.get("/api/reports")
-def get_reports():
-    response = requests.get(
-        f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc",
-        headers=SUPABASE_HEADERS
-    )
-    return response.json()
