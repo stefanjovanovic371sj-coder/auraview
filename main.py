@@ -14,128 +14,198 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
+# Univerzalni semantički rečnik
 SEMANTIC_MAP = {
-    "TIR": ["time in range", "u ciljnom opsegu", "target range", "in range", "within range", "ciljni opseg"],
+    "TIR": ["time in range", "u ciljnom opsegu", "target range", "in range", "ciljni opseg", "target"],
     "TAR": ["time above range", "above range", "iznad opsega", "high", "visoko", "iznad ciljnog"],
     "TBR": ["time below range", "below range", "ispod opsega", "low", "nisko", "ispod ciljnog"],
     "GMI": ["gmi", "glucose management indicator", "estimated a1c", "hba1c", "procenjeni a1c", "procijenjeni a1c"],
     "CV":  ["cv", "coefficient of variation", "varijabilnost", "glycemic variability"],
-    "ACTIVE_TIME": ["active time", "vreme aktivnosti", "sensor active", "active"]
+    "ACTIVE_TIME": ["active time", "vreme aktivnosti", "sensor active", "active", "time active"]
 }
 
-# ---------------------------------------------------------
-# NOVO: DEBUG RUTE ZA ANALIZU STRUKTURE PDF-a
-# ---------------------------------------------------------
+MANUFACTURERS = ["mysugr", "dexcom", "freestyle", "abbott", "medtronic", "roche", "linx", "sibionics"]
 
-@app.get("/debug", response_class=HTMLResponse)
-def debug_form():
-    return """
-    <!DOCTYPE html>
-    <html lang="bs">
-    <head>
-        <meta charset="UTF-8">
-        <title>Aura View - PDF Debugger</title>
-        <style>
-            body { font-family: monospace; background: #1e1e1e; color: #00ff00; padding: 20px; }
-            .card { background: #000; padding: 20px; border: 1px solid #00ff00; }
-            button { background: #00ff00; color: #000; padding: 10px; font-weight: bold; cursor: pointer; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h2>🛠️ RENDGEN PDF DOKUMENTA (DEBUGGER)</h2>
-            <p>Ubaci onaj problematični PDF da vidimo njegove tačne koordinate.</p>
-            <form action="/api/debug_pdf" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" accept=".pdf" required>
-                <button type="submit">Skeniraj PDF</button>
-            </form>
-        </div>
-    </body>
-    </html>
+def extract_universal_cgm_data(doc):
     """
-
-@app.post("/api/debug_pdf", response_class=PlainTextResponse)
-async def debug_pdf(file: UploadFile = File(...)):
-    content = await file.read()
-    doc = fitz.open(stream=content, filetype="pdf")
-    
-    output = []
-    output.append(f"=== ANALIZA DOKUMENTA: {file.filename} ===")
-    
+    UNIVERSAL PDF EXTRACTION LAYER: 
+    Prostorno i semantičko mapiranje PDF-a bez pogađanja.
+    """
     all_words = []
-    for page_num, page in enumerate(doc):
+    full_text = ""
+    
+    # Fokusiramo se na prve dve stranice (AGP izveštaji tu drže summary)
+    max_pages = min(2, len(doc))
+    for page_num in range(max_pages):
+        page = doc[page_num]
+        full_text += page.get_text() + " "
         words = page.get_text("words")
         for w in words:
             text = w[4].strip()
-            if not text:
-                continue
-            cx = (w[0] + w[2]) / 2
-            cy = (w[1] + w[3]) / 2
-            all_words.append({
-                "text": text, "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
-                "cx": cx, "cy": cy, "page": page_num + 1, "block": w[5], "line": w[6]
-            })
-            
-    output.append(f"Ukupno izvučeno reči: {len(all_words)}\n")
-    
+            if text:
+                cx = (w[0] + w[2]) / 2
+                cy = (w[1] + w[3]) / 2
+                all_words.append({
+                    "text": text, "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
+                    "cx": cx, "cy": cy, "page": page_num + 1, "block": w[5], "line": w[6]
+                })
+
+    # Detekcija proizvođača iz samog teksta PDF-a
+    detected_manuf = "Unknown"
+    full_text_lower = full_text.lower()
+    for m in MANUFACTURERS:
+        if m in full_text_lower:
+            detected_manuf = "Abbott" if m == "freestyle" else m.capitalize()
+            if m == "mysugr": detected_manuf = "mySugr"
+            break
+
+    # Detekcija datuma (Reporting Period)
+    dates = re.findall(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', full_text)
+    period_start, period_end = None, None
+    if len(dates) >= 2:
+        period_start = dates[0]
+        period_end = dates[-1]
+
+    # Priprema kandidata
     candidates = []
     for w in all_words:
         t = w['text'].lower()
         if re.match(r'^\d{1,3}(?:[.,]\d{1,2})?%?$', t) and '%' in t:
             candidates.append({"type": "PERCENT", "data": w})
         elif re.match(r'^\d{1,2}[.,]\d{1,2}$', t):
-             candidates.append({"type": "DECIMAL", "data": w})
-             
-    output.append("--- PRONAĐENI NUMERIČKI KANDIDATI ---")
-    for c in candidates:
-        d = c['data']
-        output.append(f"[{c['type']}] '{d['text']}' -> Strana {d['page']} | Centar Y: {d['cy']:.1f}, Centar X: {d['cx']:.1f}")
+            candidates.append({"type": "DECIMAL", "data": w})
 
-    output.append("\n--- SEMANTIČKA SIDRA I POKUŠAJ SPAJANJA ---")
-    
+    # Spajanje reči u vizuelne blokove radi traženja labela
     blocks = {}
     for w in all_words:
         key = (w['page'], w['block'], w['line'])
-        if key not in blocks:
-            blocks[key] = []
+        if key not in blocks: blocks[key] = []
         blocks[key].append(w)
 
-    found_anchors = []
+    # Standardizovani output objekat
+    report = {
+        "manufacturer": detected_manuf,
+        "reporting_period_start": period_start,
+        "reporting_period_end": period_end,
+        "metrics": {
+            "TIR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
+            "TAR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
+            "TBR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
+            "GMI": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
+            "CV":  {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
+            "ACTIVE_TIME": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"}
+        }
+    }
+
+    # Prostorno mapiranje (Raycasting)
     for key, line_words in blocks.items():
         line_text = " ".join([w['text'] for w in line_words]).lower()
         line_cx = sum(w['cx'] for w in line_words) / len(line_words)
         line_cy = sum(w['cy'] for w in line_words) / len(line_words)
         
         for metric, aliases in SEMANTIC_MAP.items():
+            if report["metrics"][metric]["confidence"] > 0.9:
+                continue # Već imamo odličan nalaz
+                
             for alias in aliases:
                 if alias in line_text:
-                    found_anchors.append({
-                        "metric": metric, "alias_found": alias, "cx": line_cx, "cy": line_cy
-                    })
+                    # Našli smo labelu! Tražimo najbližeg kandidata na Y osi (levo ili desno)
+                    valid_type = "DECIMAL" if metric in ["GMI"] else "PERCENT"
+                    matches = []
+                    
+                    for c in candidates:
+                        # GMI prihvata samo decimale, ostali procente. CV može i jedno i drugo zavisno od izveštaja, ali procent je sigurniji.
+                        if metric == "GMI" and c['type'] != "DECIMAL": continue
+                        if metric != "GMI" and c['type'] != "PERCENT": continue
+                        
+                        d = c['data']
+                        if d['page'] != line_words[0]['page']: continue
+                        
+                        y_diff = abs(d['cy'] - line_cy)
+                        if y_diff < 15.0: # Horizontalna tolerancija
+                            dist_x = abs(d['cx'] - line_cx)
+                            matches.append({"data": d, "dist_x": dist_x, "y_diff": y_diff})
+                            
+                    if matches:
+                        # Sortiramo po apsolutnoj X udaljenosti (najbliži broj labeli na istoj liniji pobeđuje)
+                        matches.sort(key=lambda m: m['dist_x'])
+                        best = matches[0]
+                        val_str = best['data']['text'].replace('%', '').replace(',', '.')
+                        
+                        try:
+                            val_float = float(val_str)
+                            # Logička provera
+                            if metric == "GMI" and not (4.0 <= val_float <= 15.0): continue
+                            if metric != "GMI" and not (0.0 <= val_float <= 100.0): continue
+                            
+                            # Računanje confidence-a na osnovu udaljenosti
+                            conf = 0.95 if best['dist_x'] < 100 else 0.75
+                            if best['y_diff'] > 5: conf -= 0.15 # Penal za blago ofsetovan Y
+                            
+                            if conf > report["metrics"][metric]["confidence"]:
+                                report["metrics"][metric] = {
+                                    "value": val_float,
+                                    "confidence": round(conf, 2),
+                                    "source": f"Labela: '{alias}', Vrednost: '{best['data']['text']}'",
+                                    "status": "OK" if conf >= 0.8 else "MANUAL_REVIEW"
+                                }
+                        except:
+                            pass
                     break
 
-    for anchor in found_anchors:
-        output.append(f"\n📍 SIDRO: {anchor['metric']} (Prepoznato iz: '{anchor['alias_found']}') | Y = {anchor['cy']:.1f}")
-        
-        matches = []
-        for c in candidates:
-            d = c['data']
-            y_diff = abs(d['cy'] - anchor['cy'])
-            if y_diff < 15.0: # Tolerancija visine
-                matches.append({"text": d['text'], "dist_x": d['cx'] - anchor['cx'], "y_diff": y_diff})
-                
-        if matches:
-            matches.sort(key=lambda m: m['dist_x'] if m['dist_x'] > 0 else float('inf'))
-            best = matches[0]
-            output.append(f"   ✅ KANDIDAT: '{best['text']}' (Y odstupanje: {best['y_diff']:.1f}px, X udaljenost: {best['dist_x']:.1f}px)")
-        else:
-            output.append("   ⚠️ Nema kandidata u istom horizontalnom redu!")
-            
-    return "\n".join(output)
+    # Validacija (TIR + TAR + TBR treba da bude ~100)
+    tir = report["metrics"]["TIR"]["value"]
+    tar = report["metrics"]["TAR"]["value"]
+    tbr = report["metrics"]["TBR"]["value"]
+    
+    if tir is not None and tar is not None and tbr is not None:
+        total = tir + tar + tbr
+        if not (98 <= total <= 102):
+            # Sistem NE ispravlja brojeve samoinicijativno, samo obara confidence
+            for m in ["TIR", "TAR", "TBR"]:
+                report["metrics"][m]["status"] = "CONFLICT"
+                report["metrics"][m]["confidence"] = max(0.1, report["metrics"][m]["confidence"] - 0.3)
+
+    return report
 
 # ---------------------------------------------------------
-# STARE RUTE (Ovo ostaje da ti sajt radi normalno)
+# API RUTE
 # ---------------------------------------------------------
+
+@app.post("/upload")
+async def upload_report(file: UploadFile = File(...)):
+    content = await file.read()
+    doc = fitz.open(stream=content, filetype="pdf")
+    
+    patient_id = "P-000127"
+    patient_check = requests.get(f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}", headers=SUPABASE_HEADERS)
+    if not patient_check.json():
+        requests.post(f"{SUPABASE_URL}/rest/v1/patients", headers=SUPABASE_HEADERS, json={"patient_id": patient_id, "name": "Stefan Jovanović"})
+    
+    # Pokretanje univerzalnog parsera
+    extracted = extract_universal_cgm_data(doc)
+    
+    # Priprema podataka za bazu iz standardizovanog formata
+    manuf = extracted["manufacturer"]
+    dname = f"{manuf} AGP Izveštaj" if manuf != "Unknown" else "CGM Izveštaj"
+
+    parsed_data = {
+        "patient_id": patient_id, 
+        "device_name": dname, 
+        "manufacturer": manuf,
+        "tir": extracted["metrics"]["TIR"]["value"], 
+        "tbr": extracted["metrics"]["TBR"]["value"], 
+        "tar": extracted["metrics"]["TAR"]["value"],
+        "gmi_percent": extracted["metrics"]["GMI"]["value"], 
+        "cv": extracted["metrics"]["CV"]["value"], 
+        "active_time": str(extracted["metrics"]["ACTIVE_TIME"]["value"]) + "%" if extracted["metrics"]["ACTIVE_TIME"]["value"] is not None else None
+    }
+    
+    response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
+    if response.status_code not in [200, 201]: 
+        raise HTTPException(status_code=500, detail=f"Baza odbila: {response.text}")
+        
+    return {"status": "success", "data": parsed_data, "engine_report": extracted}
 
 @app.get("/api/reports")
 def get_reports():
@@ -146,7 +216,7 @@ def get_reports():
 def patient_form():
     return """
     <!DOCTYPE html>
-    <html lang="bs">
+    <html lang="sr">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -182,6 +252,7 @@ def patient_form():
                 if(res.ok) {
                     document.getElementById('statusMsg').style.color = "#059669";
                     document.getElementById('statusMsg').innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
+                    console.log("Detalji parsera:", data.engine_report);
                 } else {
                     document.getElementById('statusMsg').style.color = "#dc2626";
                     document.getElementById('statusMsg').innerText = "Greška: " + (data.detail || "Došlo je do problema");
@@ -192,86 +263,11 @@ def patient_form():
     </html>
     """
 
-def _extract_number(text, is_gmi):
-    if is_gmi:
-        match = re.search(r'(\d{1,2}[.,]\d{1,2})\s*%?', text)
-    else:
-        match = re.search(r'(\d{1,3}(?:\.\d{1,2})?)\s*%', text)
-    if match:
-        val = float(match.group(1).replace(',', '.'))
-        if not is_gmi and 0 <= val <= 100: return val
-        if is_gmi and 4 <= val <= 15: return val
-    return None
-
-def extract_cgm_data_visual(doc):
-    all_words = []
-    for page_num, page in enumerate(doc):
-        words = page.get_text("words")
-        for w in words: all_words.append({"text": w[4], "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3]})
-    all_words.sort(key=lambda w: (w["y0"], w["x0"]))
-    lines = []
-    if all_words:
-        current_line = [all_words[0]]
-        for word in all_words[1:]:
-            if abs(word["y0"] - current_line[-1]["y0"]) < 5:
-                current_line.append(word)
-            else:
-                lines.append(current_line)
-                current_line = [word]
-        lines.append(current_line)
-        
-    results = {"TIR": None, "TAR": None, "TBR": None, "GMI": None, "CV": None}
-    for i, line in enumerate(lines):
-        line_text = " ".join([w["text"] for w in line]).lower()
-        for metric, aliases in SEMANTIC_MAP.items():
-            if metric == "ACTIVE_TIME" or results[metric] is not None: continue
-            for alias in aliases:
-                if alias in line_text:
-                    is_gmi = metric == "GMI"
-                    orig_line = " ".join([w["text"] for w in line])
-                    val = _extract_number(orig_line, is_gmi)
-                    if val is None and i + 1 < len(lines):
-                        next_line = " ".join([w["text"] for w in lines[i+1]])
-                        val = _extract_number(next_line, is_gmi)
-                    if val is not None: results[metric] = val
-                    break
-
-    # Ostala je ona mala provera, nismo brisali dok ne popravimo glavni kod iz debagera
-    tir, tar, tbr = results["TIR"], results["TAR"], results["TBR"]
-    if tir is not None and tar is not None and tbr is None and (tir + tar <= 100): results["TBR"] = round(100.0 - tir - tar, 1)
-    elif tir is not None and tbr is not None and tar is None and (tir + tbr <= 100): results["TAR"] = round(100.0 - tir - tbr, 1)
-    return results
-
-@app.post("/upload")
-async def upload_report(file: UploadFile = File(...)):
-    content = await file.read()
-    doc = fitz.open(stream=content, filetype="pdf")
-    patient_id = "P-000127"
-    patient_check = requests.get(f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}", headers=SUPABASE_HEADERS)
-    if not patient_check.json():
-        requests.post(f"{SUPABASE_URL}/rest/v1/patients", headers=SUPABASE_HEADERS, json={"patient_id": patient_id, "name": "Stefan Jovanović"})
-    
-    extracted = extract_cgm_data_visual(doc)
-    fname = file.filename.lower()
-    if "mysugr" in fname: manuf, dname = "mySugr", "mySugr AGP Izveštaj"
-    elif "dexcom" in fname: manuf, dname = "Dexcom", "Dexcom AGP Izveštaj"
-    elif "agp" in fname or "libre" in fname: manuf, dname = "Abbott", "FreeStyle Libre AGP"
-    else: manuf, dname = "Univerzalni CGM", "CGM Izveštaj"
-
-    parsed_data = {
-        "patient_id": patient_id, "device_name": dname, "manufacturer": manuf,
-        "tir": extracted["TIR"], "tbr": extracted["TBR"], "tar": extracted["TAR"],
-        "gmi_percent": extracted["GMI"], "cv": extracted["CV"], "active_time": "100%"
-    }
-    response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
-    if response.status_code not in [200, 201]: raise HTTPException(status_code=500, detail=f"Baza odbila: {response.text}")
-    return {"status": "success", "data": parsed_data}
-
 @app.get("/dashboard", response_class=HTMLResponse)
 def doctor_dashboard():
     return """
     <!DOCTYPE html>
-    <html lang="bs">
+    <html lang="sr">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -311,6 +307,7 @@ def doctor_dashboard():
                                 <div>TAR: <span style="color:#fbbf24;">${r.tar !== null && r.tar !== undefined ? r.tar + '%' : '-'}</span></div>
                                 <div>GMI: ${r.gmi_percent !== null && r.gmi_percent !== undefined ? r.gmi_percent + '%' : (r.gmi ? r.gmi + '%' : '-')}</div>
                                 <div>CV: ${r.cv !== null && r.cv !== undefined ? r.cv + '%' : '-'}</div>
+                                <div style="margin-left:auto; color:#64748b;">Aktivno: ${r.active_time || '-'}</div>
                             </div>
                         </div>
                     `).join('');
@@ -324,3 +321,5 @@ def doctor_dashboard():
     </body>
     </html>
     """
+
+
