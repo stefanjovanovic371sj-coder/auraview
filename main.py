@@ -7,8 +7,8 @@ app = FastAPI()
 
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
 SUPABASE_HEADERS = {
-    "apikey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1aGd1cmxpYnNhcXF4cm1oZ2RyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDE0NDY1NjYsImV4cCI6MjA1NzAyMjU2Nn0.Dgu75wMHYMiFhkuVTGgH5Tj4k8Z92s1L4p3m0x9v8c7",
-    "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1aGd1cmxpYnNhcXF4cm1oZ2RyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDE0NDY1NjYsImV4cCI6MjA1NzAyMjU2Nn0.Dgu75wMHYMiFhkuVTGgH5Tj4k8Z92s1L4p3m0x9v8c7",
+    "apikey": "sb_publishable_Dgu75wMHYMifHkuVTGgmpg_-czgDx39",
+    "Authorization": "Bearer sb_publishable_Dgu75wMHYMifHkuVTGgmpg_-czgDx39",
     "Content-Type": "application/json",
     "Prefer": "return=representation"
 }
