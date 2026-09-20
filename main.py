@@ -14,6 +14,84 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
+def extract_cgm_data(full_text):
+    text = re.sub(r"\s+", " ", full_text).strip()
+
+    def extract_percentage(anchors, window=100):
+        anchor_pattern = "|".join(re.escape(anchor) for anchor in anchors)
+        pattern = re.compile(
+            rf"(?i)(?:"
+            rf"(?:{anchor_pattern}).{{0,{window}}}?([0-9]+(?:[.,][0-9]+)?)\s*%"
+            rf"|"
+            rf"([0-9]+(?:[.,][0-9]+)?)\s*%.{{0,{window}}}?(?:{anchor_pattern})"
+            rf")"
+        )
+        match = pattern.search(text)
+        if not match:
+            return None
+        value = match.group(1) or match.group(2)
+        try:
+            value = float(value.replace(",", "."))
+        except (ValueError, AttributeError):
+            return None
+        if not 0 <= value <= 100:
+            return None
+        return value
+
+    def extract_number(anchors, window=100, require_percent=False):
+        anchor_pattern = "|".join(re.escape(anchor) for anchor in anchors)
+        if require_percent:
+            number_pattern = r"([0-9]+(?:[.,][0-9]+)?)\s*%"
+        else:
+            number_pattern = r"([0-9]+(?:[.,][0-9]+)?)\s*%?"
+        pattern = re.compile(
+            rf"(?i)(?:"
+            rf"(?:{anchor_pattern}).{{0,{window}}}?{number_pattern}"
+            rf"|"
+            rf"{number_pattern}.{{0,{window}}}?(?:{anchor_pattern})"
+            rf")"
+        )
+        match = pattern.search(text)
+        if not match:
+            return None
+        values = [g for g in match.groups() if g is not None]
+        if not values:
+            return None
+        value = values[0]
+        try:
+            return float(value.replace(",", "."))
+        except (ValueError, AttributeError):
+            return None
+
+    tir = extract_percentage([
+        "Time in Range", "U ciljnom opsegu", "U ciljanom opsegu", 
+        "Target range", "In range", "Within range"
+    ])
+    tbr = extract_percentage([
+        "Time Below Range", "Below range", "Ispod opsega", 
+        "Ispod ciljnog opsega", "Nisko", "Low"
+    ])
+    tar = extract_percentage([
+        "Time Above Range", "Above range", "Iznad opsega", 
+        "Iznad ciljnog opsega", "Visoko", "High"
+    ])
+    gmi = extract_number([
+        "GMI", "Glucose Management Indicator", "Estimated A1c", 
+        "Estimated HbA1c", "Procijenjeni A1c", "Procenjeni A1c"
+    ], require_percent=True)
+    cv = extract_percentage([
+        "Coefficient of Variation", "Coefficient of Variability", 
+        "CV", "Varijabilnost", "Glycemic Variability"
+    ])
+
+    return {
+        "tir_percent": tir,
+        "tbr_percent": tbr,
+        "tar_percent": tar,
+        "gmi_percent": gmi,
+        "cv_percent": cv
+    }
+
 @app.get("/api/reports")
 def get_reports():
     response = requests.get(
@@ -84,7 +162,6 @@ async def upload_report(file: UploadFile = File(...)):
     
     patient_id = "P-000127"
     
-    # Provera i automatsko kreiranje pacijenta u bazi ako ne postoji
     patient_check = requests.get(
         f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}",
         headers=SUPABASE_HEADERS
@@ -96,43 +173,29 @@ async def upload_report(file: UploadFile = File(...)):
             json={"patient_id": patient_id, "name": "Stefan Jovanović"}
         )
 
-    # Inicijalne podrazumevane vrednosti
-    tir_val = 70.0
-    tbr_val = 2.0
-    tar_val = 28.0
-    gmi_val = 6.0
-    cv_val = 35.0
+    # Pozivanje pametne funkcije za ekstrakciju podataka
+    extracted_data = extract_cgm_data(full_text)
 
-    # Pametno traženje uzoraka sa kontekstom (npr. tražimo brojeve praćene sa % koji su realni za TIR, 
-    # a izbegavamo nazive fajlova i niske procente)
-    matches = re.findall(r'(\d{1,3}(?:\.\d{1})?)\s*%', full_text)
-    
-    valid_numbers = []
-    for m in matches:
-        try:
-            val = float(m)
-            if 0 <= val <= 100:
-                valid_numbers.append(val)
-        except:
-            pass
-
-    # Ako imamo dovoljno brojeva, biramo onaj koji najviše odgovara profilu TIR-a (obično veći broj u sredini opsega)
-    if valid_numbers:
-        # Filtriramo samo one koji su preko 40% jer je TIR retko ispod toga u normalnim izveštajima, 
-        # ili uzimamo najveći pronađeni smisleni procenat
-        tirs = [n for n in valid_numbers if 40 <= n <= 98]
-        if tirs:
-            tir_val = tirs[0]
+    # Detekcija proizvođača iz naziva fajla
+    filename_lower = file.filename.lower()
+    if "mysugr" in filename_lower:
+        manufacturer = "mySugr"
+    elif "dexcom" in filename_lower:
+        manufacturer = "Dexcom"
+    elif "freestyle" in filename_lower or "abbott" in filename_lower:
+        manufacturer = "Abbott"
+    else:
+        manufacturer = "Standardni CGM"
 
     parsed_data = {
         "patient_id": patient_id,
-        "device_name": "mySugr AGP Izveštaj",
-        "manufacturer": "mySugr",
-        "tir": tir_val,
-        "tbr": tbr_val,
-        "tar": tar_val,
-        "gmi_percent": gmi_val,
-        "cv": cv_val,
+        "device_name": file.filename,
+        "manufacturer": manufacturer,
+        "tir": extracted_data["tir_percent"],
+        "tbr": extracted_data["tbr_percent"],
+        "tar": extracted_data["tar_percent"],
+        "gmi_percent": extracted_data["gmi_percent"],
+        "cv": extracted_data["cv_percent"],
         "active_time": "100%"
     }
     
