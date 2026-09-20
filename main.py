@@ -93,7 +93,6 @@ class UniversalCGMParser:
         self.ocr_required = False
 
     def parse(self):
-        print("--- POČETAK PARSIRANJA ---")
         self._ingest_pdf()
         if self.ocr_required:
             return {"status": "ERROR", "error_type": "OCR_REQUIRED"}
@@ -106,12 +105,10 @@ class UniversalCGMParser:
         self._aggregate_metrics()
         self._validate_cluster()
         self._extract_reporting_period()
-        print("--- KRAJ PARSIRANJA ---")
         return self._generate_final_report()
 
     def _ingest_pdf(self):
         total_words = 0
-        # Optimizacija: čitamo samo prve 2 stranice da ne gušimo Render server
         max_pages = min(2, len(self.doc))
         for page_num in range(max_pages):
             page = self.doc[page_num]
@@ -176,35 +173,36 @@ class UniversalCGMParser:
     def _extract_candidates(self):
         for r in self.regions:
             for line in r["lines"]:
-                line_text = " ".join([w["text"] for w in line]).lower()
-                for w in line:
-                    t = w["text"].lower()
-                    has_goal_operator = bool(re.search(r'[<>≤≥]', t))
-                    clean_text = re.sub(r'[<>≤≥]', '', t)
-                    is_percent = "%" in clean_text
-                    perc_match = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)', clean_text)
+                line_full_text = " ".join([w["text"] for w in line])
+                line_text_lower = line_full_text.lower()
+                
+                # Tražimo sve brojeve praćene opcionim razmakom i znakom % (ili operatore ispred)
+                # Npr. ">70%", "93 %", "5%"
+                matches = re.finditer(r'([<>]?)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(%)?', line_full_text)
+                
+                for match in matches:
+                    operator = match.group(1)
+                    val_str = match.group(2)
+                    has_percent = bool(match.group(3))
                     
-                    val, unit, c_type = None, None, None
-                    if perc_match and is_percent:
-                        val = float(perc_match.group(1).replace(',', '.'))
-                        unit = "%"; c_type = "PERCENT"
-                    elif re.match(r'^\d{1,3}[.,]\d{1,2}$', clean_text):
-                        val = float(clean_text.replace(',', '.'))
-                        unit = "DECIMAL"; c_type = "DECIMAL"
+                    val = float(val_str.replace(',', '.'))
+                    has_goal_op = bool(operator)
                     
-                    if val is not None:
-                        role, reason = "UNKNOWN", []
-                        if has_goal_operator: role, reason = "GOAL", ["GOAL_OPERATOR"]
-                        elif "target" in line_text or "goal" in line_text: role, reason = "GOAL", ["INLINE_GOAL"]
-                        elif r["context_type"] == "GOAL_ZONE": role, reason = "GOAL", ["REGION_GOAL"]
-                        else: role, reason = "ACTUAL", ["DEFAULT_ACTUAL"]
+                    role, reason = "UNKNOWN", []
+                    if has_goal_op: role, reason = "GOAL", ["GOAL_OPERATOR"]
+                    elif "target" in line_text_lower or "goal" in line_text_lower: role, reason = "GOAL", ["INLINE_GOAL"]
+                    elif r["context_type"] == "GOAL_ZONE": role, reason = "GOAL", ["REGION_GOAL"]
+                    else: role, reason = "ACTUAL", ["DEFAULT_ACTUAL"]
 
-                        self.candidates.append({
-                            "raw_text": w["text"], "value": val, "unit": unit, "type": c_type,
-                            "bbox": {"x0": w["x0"], "y0": w["y0"], "x1": w["x1"], "y1": w["y1"], "cx": w["cx"], "cy": w["cy"]},
-                            "page": w["page"], "region_id": r["region_id"], "semantic_role": role,
-                            "reason_codes": reason, "line_text": line_text
-                        })
+                    # Uzimamo koordinate prve reči u match-u radi prostornog mapiranja
+                    w_ref = line[0]
+                    self.candidates.append({
+                        "raw_text": match.group(0), "value": val, "unit": "%" if has_percent else "DECIMAL",
+                        "type": "PERCENT" if has_percent else "DECIMAL",
+                        "bbox": {"x0": w_ref["x0"], "y0": w_ref["y0"], "x1": w_ref["x1"], "y1": w_ref["y1"], "cx": w_ref["cx"], "cy": w_ref["cy"]},
+                        "page": w_ref["page"], "region_id": r["region_id"], "semantic_role": role,
+                        "reason_codes": reason, "line_text": line_text_lower
+                    })
 
     def _extract_anchors(self):
         for r in self.regions:
@@ -357,7 +355,7 @@ def doctor_dashboard():
         const res = await fetch('/api/reports');
         const data = await res.json();
         document.getElementById('c').innerHTML = data.map(r => `<div style="background:#1e293b; padding:15px; margin-bottom:10px; border-radius:8px;">
-        <strong>Pacijent: ${r.patient_id}</strong> | TIR: <span style="color:#4ade80;">${r.tir ?? '-'リル}%</span>
+        <strong>Pacijent: ${r.patient_id}</strong> | TIR: <span style="color:#4ade80;">${r.tir !== null ? r.tir + '%' : '-'}</span>
         </div>`).join('');
     }
     load();
