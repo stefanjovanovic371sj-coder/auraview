@@ -82,14 +82,12 @@ async def upload_report(file: UploadFile = File(...)):
     doc = fitz.open(stream=content, filetype="pdf")
     full_text = "".join([page.get_text() for page in doc])
     
-    # Pametno čitanje iz PDF-a
     tir_val = 70.0
     tbr_val = 2.0
     tar_val = 28.0
     gmi_val = 6.0
     cv_val = 35.0
     
-    # Pokušaj izvlačenja TIR-a preko regexa
     tir_match = re.search(r'(\d{1,3})%', full_text)
     if tir_match:
         try:
@@ -100,6 +98,7 @@ async def upload_report(file: UploadFile = File(...)):
     parsed_data = {
         "patient_id": "Pacijent-01",
         "device_name": "CGM Izveštaj",
+        "manufacturer": "mySugr",
         "tir": tir_val,
         "tbr": tbr_val,
         "tar": tar_val,
