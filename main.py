@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import fitz  # PyMuPDF
 import re
 import math
@@ -15,13 +15,19 @@ from typing import Optional, Dict, List, Any, Tuple
 
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
 SUPABASE_KEY = "sb_publishable_Dgu75wMHYMifHkuVTGgmpg_-czgDx39"
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
 
 MAX_FILE_SIZE_MB = 15
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app = FastAPI(
     title="Universal CGM AGP Parser",
-    version="2.0.1"
+    version="2.0.2"
 )
 
 
@@ -439,12 +445,8 @@ class UniversalCGMParser:
 
                 bbox = bbox_union(token_boxes) if token_boxes else line["bbox"]
 
-                # UMESTO ODBACIVANJA CELSOG REGIONA: Detektujemo cilj lokalno na nivou linije
                 is_goal_line = any(term in normalized for term in ["goal:", "target range", "above 10.0", "below 3.9", ">70%", "<25%", "<4%"])
-                if is_goal_line or operator:
-                    context = "GOAL"
-                else:
-                    context = "ACTUAL_RANGE"
+                context = "GOAL" if (is_goal_line or operator) else "ACTUAL_RANGE"
 
                 if context == "GOAL":
                     continue
@@ -535,7 +537,6 @@ class UniversalCGMParser:
         used_candidates = set()
         used_metrics = set()
 
-        # Step 1: Same line pairing
         for anchor in anchors:
             best = None
             best_score = float("inf")
@@ -557,7 +558,6 @@ class UniversalCGMParser:
                     "value": best["value"], "method": "same_line"
                 })
 
-        # Step 2: Geometric fallback
         remaining_anchors = [a for a in anchors if a["metric"] not in used_metrics]
         remaining_candidates = [c for c in candidates if c["candidate_id"] not in used_candidates]
         pairs = []
@@ -703,7 +703,7 @@ class UniversalCGMParser:
 
 
 # ============================================================
-# ENDPOINTS & HTML
+# ENDPOINTS
 # ============================================================
 
 @app.post("/debug-parser-test")
@@ -719,11 +719,51 @@ async def upload_pdf(file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     parser = UniversalCGMParser()
     report = parser.parse(pdf_bytes)
-    return {"status": report["status"], "report": report}
+    
+    patient_id = "P-000127"
+    actuals = report["actual_components"]
+    derived = report["derived_metrics"]
+    
+    parsed_data = {
+        "patient_id": patient_id,
+        "device_name": "Universal CGM Report",
+        "manufacturer": "mySugr / AGP",
+        "tir": derived.get("TIR"),
+        "tbr": derived.get("TBR"),
+        "tar": derived.get("TAR"),
+        "gmi_percent": actuals.get("GMI"),
+        "cv": actuals.get("CV"),
+        "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
+    }
+    
+    # Slanje u Supabase bazu
+    try:
+        requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data, timeout=10)
+    except Exception:
+        pass
+        
+    return {"status": report["status"], "data": parsed_data, "report": report}
+
+@app.get("/api/reports")
+def get_reports():
+    try:
+        res = requests.get(f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc", headers=SUPABASE_HEADERS, timeout=10)
+        return res.json()
+    except Exception:
+        return []
+
+
+# ============================================================
+# FRONTEND / DASHBOARDS
+# ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return HTML
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def doctor_dashboard():
+    return DASHBOARD_HTML
 
 
 HTML = """
@@ -736,7 +776,7 @@ HTML = """
 body { font-family: Arial, sans-serif; background: #f5f7fa; padding: 30px; margin: 0; }
 .container { max-width: 1100px; margin: auto; }
 .card { background: white; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
-button { padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; background: #222; color: white; font-size: 15px; }
+button { padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; background: #0d9488; color: white; font-size: 15px; font-weight: bold; }
 pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #eee; padding: 20px; border-radius: 8px; overflow-x: auto; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
 .metric { background: #f0f2f5; padding: 16px; border-radius: 8px; }
@@ -750,8 +790,10 @@ pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #e
 <div class="container">
 <div class="card">
 <h1>Universal CGM / AGP Parser</h1>
-<input id="file" type="file" accept=".pdf"><br>
-<button onclick="parseFile()">Parse PDF</button>
+<p>Upload any supported CGM AGP PDF to parse and sync with Supabase.</p>
+<input id="file" type="file" accept=".pdf"><br><br>
+<button onclick="parseFile()">Parse & Save PDF</button>
+<a href="/dashboard" style="margin-left: 15px; color: #0d9488; font-weight: bold; text-decoration: none;">Idi na Lekarski Panel →</a>
 </div>
 <div id="result"></div>
 <div class="card">
@@ -765,11 +807,11 @@ async function parseFile() {
     if (!fileInput.files.length) { alert("Choose a PDF first."); return; }
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
-    document.getElementById("result").innerHTML = "<div class='card'>Parsing...</div>";
+    document.getElementById("result").innerHTML = "<div class='card'>Parsing and syncing...</div>";
     try {
-        const response = await fetch("/debug-parser-test", { method: "POST", body: formData });
+        const response = await fetch("/upload", { method: "POST", body: formData });
         const data = await response.json();
-        renderResult(data);
+        renderResult(data.report);
         document.getElementById("json").textContent = JSON.stringify(data, null, 2);
     } catch (error) {
         document.getElementById("result").innerHTML = "<div class='card'><b>Error:</b> " + error + "</div>";
@@ -786,12 +828,64 @@ function renderResult(data) {
     html += "</div><h3>Standardized</h3><div class='grid'>";
     html += metric("TBR", d.TBR, "%") + metric("TIR", d.TIR, "%") + metric("TAR", d.TAR, "%");
     html += "</div></div>";
-    document.getElementById("result").innerHTML = document.getElementById("result").innerHTML = html;
+    document.getElementById("result").innerHTML = html;
 }
 function metric(label, value, unit) {
     let display = (value === null || value === undefined) ? "—" : value + " " + unit;
     return "<div class='metric'><strong>" + label + "</strong><span>" + display + "</span></div>";
 }
+</script>
+</body>
+</html>
+"""
+
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+<meta charset="UTF-8">
+<title>Dr Marko Jovanović — Live Panel</title>
+<style>
+body { background: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 25px; margin: 0; }
+.container { max-width: 1000px; margin: auto; }
+h2 { color: #38bdf8; border-bottom: 2px solid #334155; padding-bottom: 10px; }
+.report-card { background: #1e293b; padding: 20px; margin-bottom: 15px; border-radius: 10px; border: 1px solid #334155; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+.nav { margin-bottom: 20px; }
+.nav a { color: #38bdf8; text-decoration: none; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="nav"><a href="/">← Nazad na Upload</a></div>
+<h2>Dr Marko Jovanović — Live Panel</h2>
+<div id="c">Učitavanje izveštaja iz baze...</div>
+</div>
+<script>
+async function loadReports() {
+    try {
+        const res = await fetch('/api/reports');
+        const data = await res.json();
+        if(!data.length) {
+            document.getElementById('c').innerHTML = "<p>Nema sačuvanih izveštaja u bazi.</p>";
+            return;
+        }
+        document.getElementById('c').innerHTML = data.map(r => `
+            <div class="report-card">
+                <strong>Pacijent: ${r.patient_id}</strong> — <span style="color:#38bdf8;">${r.device_name || 'CGM'} (${r.manufacturer || ''})</span><br><br>
+                TIR: <span style="color:#4ade80; font-size:20px; font-weight:bold;">${r.tir !== null ? r.tir + '%' : '-'}</span> | 
+                TBR: <span style="color:#f87171; font-weight:bold;">${r.tbr !== null ? r.tbr + '%' : '-'}</span> | 
+                TAR: <span style="color:#fbbf24; font-weight:bold;">${r.tar !== null ? r.tar + '%' : '-'}</span> | 
+                GMI: ${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'} | 
+                CV: ${r.cv !== null ? r.cv + '%' : '-'} | 
+                Aktivno: ${r.active_time || '-'}
+            </div>
+        `).join('');
+    } catch(err) {
+        document.getElementById('c').innerHTML = "<p style='color:#f87171;'>Greška pri učitavanju sa servera.</p>";
+    }
+}
+loadReports();
+setInterval(loadReports, 5000);
 </script>
 </body>
 </html>
