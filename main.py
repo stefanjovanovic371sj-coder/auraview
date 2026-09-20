@@ -82,13 +82,13 @@ async def upload_report(file: UploadFile = File(...)):
     full_text = "".join([page.get_text() for page in doc])
     
     parsed_data = {
-        "patient_id": "P-000127",
-        "device_name": "Roche SmartGuide",
-        "tir": 70.0,
-        "tbr": 2.0,
-        "tar": 28.0,
-        "gmi_percent": 5.6,
-        "cv": 36.0,
+        "patient_id": "Pacijent-01",
+        "device_name": "Dexcom / FreeStyle",
+        "tir": 72.5,
+        "tbr": 1.8,
+        "tar": 25.7,
+        "gmi_percent": 6.1,
+        "cv": 34.0,
         "active_time": "100%"
     }
     
@@ -136,17 +136,17 @@ def doctor_dashboard():
                     container.innerHTML = reports.map(r => `
                         <div class="card">
                             <div style="display:flex; justify-content:space-between;">
-                                <strong>Pacijent: ${r.patient_id || 'Nepoznat'}</strong>
+                                <strong>Pacijent: ${r.patient_id ? r.patient_id : 'Nepoznat'}</strong>
                                 <span style="color:#38bdf8;">${r.device_name || 'CGM'}</span>
                             </div>
                             <div style="margin: 10px 0;">
-                                <span class="tir">${r.tir}%</span> TIR
+                                <span class="tir">${r.tir !== null && r.tir !== undefined ? r.tir + '%' : '-'}</span> TIR
                             </div>
                             <div class="metrics">
-                                <div>TBR: <span style="color:#f87171;">${r.tbr}%</span></div>
-                                <div>TAR: <span style="color:#fbbf24;">${r.tar}%</span></div>
-                                <div>GMI: ${r.gmi_percent || r.gmi || '-'}%</div>
-                                <div>CV: ${r.cv}%</div>
+                                <div>TBR: <span style="color:#f87171;">${r.tbr !== null && r.tbr !== undefined ? r.tbr + '%' : '-'}</span></div>
+                                <div>TAR: <span style="color:#fbbf24;">${r.tar !== null && r.tar !== undefined ? r.tar + '%' : '-'}</span></div>
+                                <div>GMI: ${r.gmi_percent !== null && r.gmi_percent !== undefined ? r.gmi_percent + '%' : (r.gmi ? r.gmi + '%' : '-')}</div>
+                                <div>CV: ${r.cv !== null && r.cv !== undefined ? r.cv + '%' : '-'}</div>
                             </div>
                         </div>
                     `).join('');
