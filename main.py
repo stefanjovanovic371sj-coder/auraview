@@ -6,7 +6,7 @@ import pymupdf as fitz
 
 app = FastAPI()
 
-# SUPABASE KONFIGURACIJA SA PUNIM KLJUČem
+# SUPABASE KONFIGURACIJA
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
 SUPABASE_HEADERS = {
     "apikey": "sb_publishable_Dgu75wMHYMiFhkuVTGg...",
@@ -25,8 +25,18 @@ def parse_cgm_pdf(file_bytes: bytes):
     tbr_val = 3.0
     gmi_val = 5.7
     cv_val = 36.0
-    patient_id = "P-0127"
+    patient_id = "Nepoznat pacijent"
     device_name = "CGM Sensor"
+
+    # Pametno izvlačenje imena ili ID-ja pacijenta iz PDF-a
+    name_match = re.search(r'(?:Patient|Ime i prezime|Pacijent)[:\s]+([A-ZŠĐČĆŽa-zšđčćž\s]{3,30})', full_text)
+    if name_match:
+        patient_id = name_match.group(1).strip()
+    else:
+        # Ako nema imena, traži ID ili serijski broj
+        id_match = re.search(r'(?:ID|Serial|Broj)[:\s]*([A-Za-z0-9\-]{4,15})', full_text)
+        if id_match:
+            patient_id = id_match.group(1).strip()
 
     # Pametnije izvlačenje TIR-a
     tir_match = re.search(r'(?:TIR|u opsegu|u cilju)[^\d]*(\d{1,3})%', full_text, re.IGNORECASE)
@@ -134,7 +144,7 @@ def doctor_dashboard():
     <html lang="sr">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0";>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Aura View - Doktorski Panel</title>
         <style>
             body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; margin: 0; }
