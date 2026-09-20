@@ -1,8 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse
 import requests
 import pymupdf as fitz
 import re
+import math
 
 app = FastAPI()
 
@@ -14,163 +15,396 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
-# Univerzalni semantički rečnik
-SEMANTIC_MAP = {
-    "TIR": ["time in range", "u ciljnom opsegu", "target range", "in range", "ciljni opseg", "target"],
-    "TAR": ["time above range", "above range", "iznad opsega", "high", "visoko", "iznad ciljnog"],
-    "TBR": ["time below range", "below range", "ispod opsega", "low", "nisko", "ispod ciljnog"],
-    "GMI": ["gmi", "glucose management indicator", "estimated a1c", "hba1c", "procenjeni a1c", "procijenjeni a1c"],
-    "CV":  ["cv", "coefficient of variation", "varijabilnost", "glycemic variability"],
-    "ACTIVE_TIME": ["active time", "vreme aktivnosti", "sensor active", "active", "time active"]
+# 5. METRIC ONTOLOGY
+METRIC_ONTOLOGY = {
+    "TIR": {
+        "canonical": "TIR",
+        "aliases": ["time in range", "in range", "target range", "within range", "u ciljnom opsegu", "ciljni opseg"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "TAR": {
+        "canonical": "TAR",
+        "aliases": ["time above range", "above range", "high", "iznad opsega", "visoko"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "TBR": {
+        "canonical": "TBR",
+        "aliases": ["time below range", "below range", "low", "ispod opsega", "nisko"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "VERY_HIGH": {
+        "canonical": "VERY_HIGH",
+        "aliases": ["very high", "veoma visoko"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "VERY_LOW": {
+        "canonical": "VERY_LOW",
+        "aliases": ["very low", "veoma nisko"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "GMI": {
+        "canonical": "GMI",
+        "aliases": ["glucose management indicator", "gmi", "estimated a1c", "hba1c"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "DECIMAL",
+        "valid_range": (4, 15)
+    },
+    "CV": {
+        "canonical": "CV",
+        "aliases": ["glucose variability", "coefficient of variation", "cv", "varijabilnost"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "ACTIVE_TIME": {
+        "canonical": "ACTIVE_TIME",
+        "aliases": ["time cgm active", "active time", "sensor active", "vreme aktivnosti"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "%",
+        "valid_range": (0, 100)
+    },
+    "AVG_GLUCOSE": {
+        "canonical": "AVG_GLUCOSE",
+        "aliases": ["average glucose", "mean glucose", "prosečna glukoza"],
+        "expected_role": "ACTUAL",
+        "expected_unit": "DECIMAL",
+        "valid_range": (2, 25)
+    }
 }
 
-MANUFACTURERS = ["mysugr", "dexcom", "freestyle", "abbott", "medtronic", "roche", "linx", "sibionics"]
+class UniversalCGMParser:
+    def __init__(self, doc):
+        self.doc = doc
+        self.pages = []
+        self.regions = []
+        self.lines = []
+        self.candidates = []
+        self.anchors = []
+        self.results = {key: None for key in METRIC_ONTOLOGY.keys()}
+        self.reporting_period = {"start": None, "end": None}
+        self.ocr_required = False
 
-def extract_universal_cgm_data(doc):
-    """
-    UNIVERSAL PDF EXTRACTION LAYER: 
-    Prostorno i semantičko mapiranje PDF-a bez pogađanja.
-    """
-    all_words = []
-    full_text = ""
-    
-    # Fokusiramo se na prve dve stranice (AGP izveštaji tu drže summary)
-    max_pages = min(2, len(doc))
-    for page_num in range(max_pages):
-        page = doc[page_num]
-        full_text += page.get_text() + " "
-        words = page.get_text("words")
-        for w in words:
-            text = w[4].strip()
-            if text:
-                cx = (w[0] + w[2]) / 2
-                cy = (w[1] + w[3]) / 2
-                all_words.append({
-                    "text": text, "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
-                    "cx": cx, "cy": cy, "page": page_num + 1, "block": w[5], "line": w[6]
-                })
-
-    # Detekcija proizvođača iz samog teksta PDF-a
-    detected_manuf = "Unknown"
-    full_text_lower = full_text.lower()
-    for m in MANUFACTURERS:
-        if m in full_text_lower:
-            detected_manuf = "Abbott" if m == "freestyle" else m.capitalize()
-            if m == "mysugr": detected_manuf = "mySugr"
-            break
-
-    # Detekcija datuma (Reporting Period)
-    dates = re.findall(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', full_text)
-    period_start, period_end = None, None
-    if len(dates) >= 2:
-        period_start = dates[0]
-        period_end = dates[-1]
-
-    # Priprema kandidata
-    candidates = []
-    for w in all_words:
-        t = w['text'].lower()
-        if re.match(r'^\d{1,3}(?:[.,]\d{1,2})?%?$', t) and '%' in t:
-            candidates.append({"type": "PERCENT", "data": w})
-        elif re.match(r'^\d{1,2}[.,]\d{1,2}$', t):
-            candidates.append({"type": "DECIMAL", "data": w})
-
-    # Spajanje reči u vizuelne blokove radi traženja labela
-    blocks = {}
-    for w in all_words:
-        key = (w['page'], w['block'], w['line'])
-        if key not in blocks: blocks[key] = []
-        blocks[key].append(w)
-
-    # Standardizovani output objekat
-    report = {
-        "manufacturer": detected_manuf,
-        "reporting_period_start": period_start,
-        "reporting_period_end": period_end,
-        "metrics": {
-            "TIR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
-            "TAR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
-            "TBR": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
-            "GMI": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
-            "CV":  {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"},
-            "ACTIVE_TIME": {"value": None, "confidence": 0.0, "source": "", "status": "NOT_FOUND"}
-        }
-    }
-
-    # Prostorno mapiranje (Raycasting)
-    for key, line_words in blocks.items():
-        line_text = " ".join([w['text'] for w in line_words]).lower()
-        line_cx = sum(w['cx'] for w in line_words) / len(line_words)
-        line_cy = sum(w['cy'] for w in line_words) / len(line_words)
+    def parse(self):
+        self._ingest_pdf()
+        if self.ocr_required:
+            return self._generate_error_report("OCR_REQUIRED")
         
-        for metric, aliases in SEMANTIC_MAP.items():
-            if report["metrics"][metric]["confidence"] > 0.9:
-                continue # Već imamo odličan nalaz
-                
-            for alias in aliases:
-                if alias in line_text:
-                    # Našli smo labelu! Tražimo najbližeg kandidata na Y osi (levo ili desno)
-                    valid_type = "DECIMAL" if metric in ["GMI"] else "PERCENT"
-                    matches = []
+        self._build_layout()
+        self._classify_regions()
+        self._extract_candidates()
+        self._extract_anchors()
+        self._associate_labels_and_values()
+        self._aggregate_metrics()
+        self._validate_cluster()
+        self._extract_reporting_period()
+        return self._generate_final_report()
+
+    # 1. PDF INGESTION & OCR CHECK
+    def _ingest_pdf(self):
+        total_words = 0
+        for page_num, page in enumerate(self.doc):
+            words = page.get_text("words")
+            total_words += len(words)
+            page_data = {"page_num": page_num + 1, "words": []}
+            for w in words:
+                text = w[4].strip()
+                if text:
+                    page_data["words"].append({
+                        "text": text, "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
+                        "cx": (w[0] + w[2]) / 2, "cy": (w[1] + w[3]) / 2,
+                        "block": w[5], "line": w[6], "page": page_num + 1
+                    })
+            self.pages.append(page_data)
+        
+        if total_words < 10:
+            self.ocr_required = True
+
+    # 2. LAYOUT ENGINE
+    def _build_layout(self):
+        region_counter = 0
+        for page in self.pages:
+            # Grupisanje reči u linije na osnovu Y tolerancije
+            page['words'].sort(key=lambda w: (w["y0"], w["x0"]))
+            current_line = []
+            page_lines = []
+            
+            for w in page['words']:
+                if not current_line:
+                    current_line.append(w)
+                else:
+                    last_w = current_line[-1]
+                    if abs(w["cy"] - last_w["cy"]) < 6:
+                        current_line.append(w)
+                    else:
+                        page_lines.append(current_line)
+                        current_line = [w]
+            if current_line:
+                page_lines.append(current_line)
+
+            # Grupisanje linija u regione na osnovu vertikalne udaljenosti (razmak veći od 20px)
+            current_region = []
+            for line in page_lines:
+                if not current_region:
+                    current_region.append(line)
+                else:
+                    last_line = current_region[-1]
+                    y_diff = line[0]["cy"] - last_line[0]["cy"]
+                    if y_diff < 25:
+                        current_region.append(line)
+                    else:
+                        region_counter += 1
+                        self._register_region(region_counter, current_region, page["page_num"])
+                        current_region = [line]
+            if current_region:
+                region_counter += 1
+                self._register_region(region_counter, current_region, page["page_num"])
+
+    def _register_region(self, reg_id, lines, page_num):
+        x0 = min(w["x0"] for line in lines for w in line)
+        y0 = min(w["y0"] for line in lines for w in line)
+        x1 = max(w["x1"] for line in lines for w in line)
+        y1 = max(w["y1"] for line in lines for w in line)
+        
+        text = " ".join([" ".join([w["text"] for w in line]) for line in lines]).lower()
+        
+        self.regions.append({
+            "region_id": f"reg_{page_num}_{reg_id}",
+            "page": page_num,
+            "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+            "text": text,
+            "lines": lines,
+            "context_type": "UNKNOWN"
+        })
+
+    def _classify_regions(self):
+        goal_keywords = ["goal", "target", "cilj", "recommended", "reference"]
+        for r in self.regions:
+            if any(k in r["text"] for k in goal_keywords):
+                r["context_type"] = "GOAL_ZONE"
+
+    # 3 & 4. INTERMEDIATE REPRESENTATION & SEMANTIC ROLE CLASSIFICATION
+    def _extract_candidates(self):
+        for r in self.regions:
+            for line in r["lines"]:
+                line_text = " ".join([w["text"] for w in line]).lower()
+                for w in line:
+                    t = w["text"].lower()
                     
-                    for c in candidates:
-                        # GMI prihvata samo decimale, ostali procente. CV može i jedno i drugo zavisno od izveštaja, ali procent je sigurniji.
-                        if metric == "GMI" and c['type'] != "DECIMAL": continue
-                        if metric != "GMI" and c['type'] != "PERCENT": continue
+                    # Detekcija operatora
+                    has_goal_operator = bool(re.search(r'[<>≤≥]', t))
+                    clean_text = re.sub(r'[<>≤≥]', '', t)
+                    
+                    is_percent = "%" in clean_text
+                    perc_match = re.search(r'(\d{1,3}(?:[.,]\d{1,2})?)', clean_text)
+                    
+                    val = None
+                    unit = None
+                    c_type = None
+                    
+                    if perc_match and is_percent:
+                        val = float(perc_match.group(1).replace(',', '.'))
+                        unit = "%"
+                        c_type = "PERCENT"
+                    elif re.match(r'^\d{1,3}[.,]\d{1,2}$', clean_text):
+                        val = float(clean_text.replace(',', '.'))
+                        unit = "DECIMAL"
+                        c_type = "DECIMAL"
+                    
+                    if val is not None:
+                        # SEMANTIC ROLE RULES
+                        role = "UNKNOWN"
+                        reason = []
                         
-                        d = c['data']
-                        if d['page'] != line_words[0]['page']: continue
+                        if has_goal_operator:
+                            role = "GOAL"
+                            reason.append("GOAL_OPERATOR_DETECTED")
+                        elif "target" in line_text or "goal" in line_text:
+                            role = "GOAL"
+                            reason.append("INLINE_GOAL_CONTEXT")
+                        elif r["context_type"] == "GOAL_ZONE":
+                            role = "GOAL"
+                            reason.append("REGION_GOAL_CONTEXT")
+                        else:
+                            role = "ACTUAL"
+                            reason.append("DEFAULT_ACTUAL_NO_GOAL_INDICATORS")
+
+                        self.candidates.append({
+                            "raw_text": w["text"],
+                            "value": val,
+                            "unit": unit,
+                            "type": c_type,
+                            "bbox": {"x0": w["x0"], "y0": w["y0"], "x1": w["x1"], "y1": w["y1"], "cx": w["cx"], "cy": w["cy"]},
+                            "page": w["page"],
+                            "region_id": r["region_id"],
+                            "semantic_role": role,
+                            "reason_codes": reason,
+                            "line_text": line_text
+                        })
+
+    def _extract_anchors(self):
+        for r in self.regions:
+            for line in r["lines"]:
+                line_text = " ".join([w["text"] for w in line]).lower()
+                line_y = line[0]["cy"]
+                
+                for m_key, m_data in METRIC_ONTOLOGY.items():
+                    for alias in m_data["aliases"]:
+                        if alias in line_text:
+                            # Sprečavanje da se ista labela uhvati dvaput na istoj liniji
+                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 10 for a in self.anchors):
+                                self.anchors.append({
+                                    "metric": m_key,
+                                    "expected_role": m_data["expected_role"],
+                                    "expected_unit": m_data["expected_unit"],
+                                    "raw_text": alias,
+                                    "page": r["page"],
+                                    "region_id": r["region_id"],
+                                    "cy": line_y,
+                                    "cx": sum(w["cx"] for w in line) / len(line),
+                                    "line_text": line_text
+                                })
+
+    # 6 & 7. LABEL → VALUE ASSOCIATION & EVIDENCE
+    def _associate_labels_and_values(self):
+        for anchor in self.anchors:
+            valid_candidates = []
+            
+            for c in self.candidates:
+                if c["page"] != anchor["page"]: continue
+                # Odbacivanje GOAL kandidata ako anchor traži ACTUAL
+                if anchor["expected_role"] == "ACTUAL" and c["semantic_role"] == "GOAL": continue
+                if c["unit"] != anchor["expected_unit"]: continue
+                
+                # Provera dozvoljenog opsega metrike
+                v_min, v_max = METRIC_ONTOLOGY[anchor["metric"]]["valid_range"]
+                if not (v_min <= c["value"] <= v_max): continue
+                
+                y_diff = abs(c["bbox"]["cy"] - anchor["cy"])
+                x_diff = abs(c["bbox"]["cx"] - anchor["cx"])
+                
+                if y_diff < 15 or (y_diff < 40 and c["region_id"] == anchor["region_id"]):
+                    score = 0.5
+                    evidence = ["ROLE_MATCH", "UNIT_MATCH"]
+                    
+                    if y_diff < 10: 
+                        score += 0.3
+                        evidence.append("SAME_LINE")
+                    if c["region_id"] == anchor["region_id"]: 
+                        score += 0.2
+                        evidence.append("SAME_REGION")
                         
-                        y_diff = abs(d['cy'] - line_cy)
-                        if y_diff < 15.0: # Horizontalna tolerancija
-                            dist_x = abs(d['cx'] - line_cx)
-                            matches.append({"data": d, "dist_x": dist_x, "y_diff": y_diff})
-                            
-                    if matches:
-                        # Sortiramo po apsolutnoj X udaljenosti (najbliži broj labeli na istoj liniji pobeđuje)
-                        matches.sort(key=lambda m: m['dist_x'])
-                        best = matches[0]
-                        val_str = best['data']['text'].replace('%', '').replace(',', '.')
-                        
-                        try:
-                            val_float = float(val_str)
-                            # Logička provera
-                            if metric == "GMI" and not (4.0 <= val_float <= 15.0): continue
-                            if metric != "GMI" and not (0.0 <= val_float <= 100.0): continue
-                            
-                            # Računanje confidence-a na osnovu udaljenosti
-                            conf = 0.95 if best['dist_x'] < 100 else 0.75
-                            if best['y_diff'] > 5: conf -= 0.15 # Penal za blago ofsetovan Y
-                            
-                            if conf > report["metrics"][metric]["confidence"]:
-                                report["metrics"][metric] = {
-                                    "value": val_float,
-                                    "confidence": round(conf, 2),
-                                    "source": f"Labela: '{alias}', Vrednost: '{best['data']['text']}'",
-                                    "status": "OK" if conf >= 0.8 else "MANUAL_REVIEW"
-                                }
-                        except:
-                            pass
+                    valid_candidates.append({
+                        "candidate": c,
+                        "score": score,
+                        "distance": x_diff + (y_diff * 2),
+                        "evidence": evidence
+                    })
+            
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: (-x["score"], x["distance"]))
+                best = valid_candidates[0]
+                
+                current_result = self.results[anchor["metric"]]
+                # Ako nađemo bolji rezultat na dokumentu (veći score), prepiši
+                if not current_result or best["score"] > current_result["confidence"]:
+                    self.results[anchor["metric"]] = {
+                        "value": best["candidate"]["value"],
+                        "confidence": round(best["score"], 2),
+                        "status": "OK" if best["score"] >= 0.8 else "MANUAL_REVIEW",
+                        "semantic_role": best["candidate"]["semantic_role"],
+                        "page": anchor["page"],
+                        "source": {
+                            "label_text": anchor["raw_text"],
+                            "value_text": best["candidate"]["raw_text"],
+                            "region_id": best["candidate"]["region_id"]
+                        },
+                        "reason_codes": best["evidence"] + best["candidate"]["reason_codes"]
+                    }
+
+    # 8. AGGREGATION
+    def _aggregate_metrics(self):
+        # TIR agregacija nije uobičajena, ali TAR (High + Very High) i TBR (Low + Very Low) jesu.
+        tar_res = self.results["TAR"]
+        vh_res = self.results["VERY_HIGH"]
+        h_res = self.results.get("HIGH") # Nije u primarnoj ontologiji trenutno, ali logika ostaje
+
+        # Agregacija TBR = Very Low + Low
+        tbr_res = self.results["TBR"]
+        vl_res = self.results["VERY_LOW"]
+        
+        # Ako nemamo čist TBR, ali imamo VERY_LOW (i pretpostavljeno LOW koje je možda pokupljeno kao TBR)
+        # Ovde se držimo striktno pravila: spajamo ih samo ako pripadaju istom ACTUAL klasteru.
+        if vl_res and tbr_res and vl_res["source"]["region_id"] == tbr_res["source"]["region_id"]:
+            # Zbir komponenti
+            self.results["TBR"]["value"] = round(vl_res["value"] + tbr_res["value"], 1)
+            self.results["TBR"]["reason_codes"].append("AGGREGATED_VERY_LOW_AND_LOW")
+
+    # 9. VALIDATION
+    def _validate_cluster(self):
+        tir = self.results["TIR"]
+        tar = self.results["TAR"]
+        tbr = self.results["TBR"]
+        
+        if tir and tar and tbr and all(v["status"] in ["OK", "MANUAL_REVIEW"] for v in [tir, tar, tbr]):
+            total = tir["value"] + tar["value"] + tbr["value"]
+            if 98 <= total <= 102:
+                for metric in [tir, tar, tbr]:
+                    metric["confidence"] = min(1.0, metric["confidence"] + 0.1)
+                    metric["status"] = "OK"
+                    metric["reason_codes"].append("VALIDATED_BY_CLUSTER_SUM_100")
+            else:
+                for metric in [tir, tar, tbr]:
+                    metric["status"] = "CONFLICT_SUM"
+                    metric["confidence"] = max(0.1, metric["confidence"] - 0.3)
+
+    # 10. REPORTING PERIOD
+    def _extract_reporting_period(self):
+        date_pattern = r'\b\d{1,2}[\s./-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|[a-zA-Z]{3}|\d{1,2})[\s./-]\d{2,4}\b'
+        for r in self.regions:
+            if any(k in r["text"] for k in ["period", "date", "od", "do", "from", "to"]):
+                dates = re.findall(date_pattern, r["text"])
+                if len(dates) >= 2:
+                    self.reporting_period["start"] = dates[0]
+                    self.reporting_period["end"] = dates[1]
                     break
 
-    # Validacija (TIR + TAR + TBR treba da bude ~100)
-    tir = report["metrics"]["TIR"]["value"]
-    tar = report["metrics"]["TAR"]["value"]
-    tbr = report["metrics"]["TBR"]["value"]
-    
-    if tir is not None and tar is not None and tbr is not None:
-        total = tir + tar + tbr
-        if not (98 <= total <= 102):
-            # Sistem NE ispravlja brojeve samoinicijativno, samo obara confidence
-            for m in ["TIR", "TAR", "TBR"]:
-                report["metrics"][m]["status"] = "CONFLICT"
-                report["metrics"][m]["confidence"] = max(0.1, report["metrics"][m]["confidence"] - 0.3)
+    def _generate_error_report(self, error_type):
+        return {"status": "ERROR", "error_type": error_type}
 
-    return report
+    def _generate_final_report(self):
+        # Formatiranje u standardizovani CGMReport
+        final_metrics = {}
+        for key, res in self.results.items():
+            if res:
+                final_metrics[key] = res
+            else:
+                final_metrics[key] = {
+                    "value": None,
+                    "confidence": 0.0,
+                    "status": "NOT_FOUND",
+                    "semantic_role": "UNKNOWN",
+                    "reason_codes": []
+                }
+                
+        return {
+            "status": "SUCCESS",
+            "manufacturer": "Unknown", # Ostavljeno kao metadata, više ne utiče na parsiranje
+            "reporting_period": self.reporting_period,
+            "metrics": final_metrics
+        }
 
-# ---------------------------------------------------------
-# API RUTE
-# ---------------------------------------------------------
+
+# --- API RUTE (Nepromenjene spoljašnje strukture) ---
 
 @app.post("/upload")
 async def upload_report(file: UploadFile = File(...)):
@@ -182,23 +416,34 @@ async def upload_report(file: UploadFile = File(...)):
     if not patient_check.json():
         requests.post(f"{SUPABASE_URL}/rest/v1/patients", headers=SUPABASE_HEADERS, json={"patient_id": patient_id, "name": "Stefan Jovanović"})
     
-    # Pokretanje univerzalnog parsera
-    extracted = extract_universal_cgm_data(doc)
+    # 🚀 Pokretanje novog UNIVERSAL PARSERA
+    parser = UniversalCGMParser(doc)
+    extracted = parser.parse()
     
-    # Priprema podataka za bazu iz standardizovanog formata
-    manuf = extracted["manufacturer"]
-    dname = f"{manuf} AGP Izveštaj" if manuf != "Unknown" else "CGM Izveštaj"
+    if extracted.get("status") == "ERROR" and extracted.get("error_type") == "OCR_REQUIRED":
+        raise HTTPException(status_code=422, detail="PDF ne sadrži tekst (skenirana slika). OCR nije podržan u ovoj verziji.")
 
+    # Detekcija imena za dashboard (Metadata)
+    fname = file.filename.lower()
+    manuf = "Standardni CGM"
+    for m in MANUFACTURERS:
+        if m in fname: manuf = m.capitalize(); break
+    if "mysugr" in fname: manuf = "mySugr"
+    
+    dname = f"{manuf} AGP Izveštaj"
+
+    # Preslikavanje rich objekta u ravnu Supabase bazu
+    metrics = extracted["metrics"]
     parsed_data = {
         "patient_id": patient_id, 
         "device_name": dname, 
         "manufacturer": manuf,
-        "tir": extracted["metrics"]["TIR"]["value"], 
-        "tbr": extracted["metrics"]["TBR"]["value"], 
-        "tar": extracted["metrics"]["TAR"]["value"],
-        "gmi_percent": extracted["metrics"]["GMI"]["value"], 
-        "cv": extracted["metrics"]["CV"]["value"], 
-        "active_time": str(extracted["metrics"]["ACTIVE_TIME"]["value"]) + "%" if extracted["metrics"]["ACTIVE_TIME"]["value"] is not None else None
+        "tir": metrics["TIR"]["value"], 
+        "tbr": metrics["TBR"]["value"], 
+        "tar": metrics["TAR"]["value"],
+        "gmi_percent": metrics["GMI"]["value"], 
+        "cv": metrics["CV"]["value"], 
+        "active_time": str(metrics["ACTIVE_TIME"]["value"]) + "%" if metrics["ACTIVE_TIME"]["value"] is not None else None
     }
     
     response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
@@ -252,7 +497,7 @@ def patient_form():
                 if(res.ok) {
                     document.getElementById('statusMsg').style.color = "#059669";
                     document.getElementById('statusMsg').innerText = "Izveštaj uspešno sačuvan i prosleđen lekaru!";
-                    console.log("Detalji parsera:", data.engine_report);
+                    console.log("🛠️ Detaljna analiza univerzalnog parsera:", data.engine_report);
                 } else {
                     document.getElementById('statusMsg').style.color = "#dc2626";
                     document.getElementById('statusMsg').innerText = "Greška: " + (data.detail || "Došlo je do problema");
@@ -321,5 +566,3 @@ def doctor_dashboard():
     </body>
     </html>
     """
-
-
