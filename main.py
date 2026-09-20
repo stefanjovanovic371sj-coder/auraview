@@ -27,12 +27,12 @@ MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app = FastAPI(
     title="Universal CGM AGP Parser",
-    version="2.2.0"
+    version="2.3.0"
 )
 
 
 # ============================================================
-# METRIC DEFINITIONS (Expanded for Linx, Abbott Libre, mySugr)
+# METRIC DEFINITIONS (English + Serbian Cyrillic/Latin support)
 # ============================================================
 
 Metrics = {
@@ -40,7 +40,9 @@ Metrics = {
     "VERY_LOW": {
         "aliases": [
             "very low",
-            "very-low"
+            "very-low",
+            "vrlo nisko",
+            "веома ниско"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -50,7 +52,9 @@ Metrics = {
         "aliases": [
             "low",
             "tbr",
-            "below range"
+            "below range",
+            "nisko",
+            "ниско"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -62,7 +66,11 @@ Metrics = {
             "in-range",
             "time in range",
             "normal",
-            "tir"
+            "tir",
+            "u opsegu",
+            "у опсегу",
+            "normalno",
+            "нормално"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -72,7 +80,9 @@ Metrics = {
         "aliases": [
             "high",
             "tar",
-            "above range"
+            "above range",
+            "visoko",
+            "високо"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -81,7 +91,9 @@ Metrics = {
     "VERY_HIGH": {
         "aliases": [
             "very high",
-            "very-high"
+            "very-high",
+            "vrlo visoko",
+            "веома високо"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -90,7 +102,9 @@ Metrics = {
     "GMI": {
         "aliases": [
             "glucose management indicator",
-            "gmi"
+            "gmi",
+            "indikator upravljanja glukozom",
+            "индикатор управљања глукозом"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -104,7 +118,11 @@ Metrics = {
             "gv (cvs)",
             "gv (cv)",
             "gv",
-            "cv"
+            "cv",
+            "varijabilnost",
+            "варијабилност",
+            "koeficijent varijacije",
+            "коефицијент варијације"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -118,7 +136,11 @@ Metrics = {
             "active time",
             "sensor active",
             "cgm coverage time",
-            "coverage time"
+            "coverage time",
+            "aktivno vreme",
+            "активно време",
+            "vreme rada senzora",
+            "време рада сензора"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -129,7 +151,11 @@ Metrics = {
             "average glucose",
             "mean glucose",
             "mbg",
-            "mean blood glucose"
+            "mean blood glucose",
+            "prosečna glukoza",
+            "просечна глукоза",
+            "srednja glukoza",
+            "средња глукоза"
         ],
         "unit": "GLUCOSE",
         "type": "METRIC"
@@ -138,16 +164,19 @@ Metrics = {
 
 
 # ============================================================
-# DATE PATTERNS
+# DATE PATTERNS (Supporting English, Serbian Latin & Cyrillic)
 # ============================================================
 
-MONTHS = (
-    "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
-)
+MONTHS_ENG = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+MONTHS_SRB_LAT = "jan|feb|mar|apr|maj|jun|jul|avg|sep|okt|nov|dec"
+MONTHS_SRB_CYR = "јан|феб|мар|апр|мај|јун|јул|авг|сеп|окт|нов|дец"
+
+ALL_MONTHS = f"{MONTHS_ENG}|{MONTHS_SRB_LAT}|{MONTHS_SRB_CYR}"
 
 DATE_PATTERN = re.compile(
-    rf"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?"
-    rf"\s*(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})"
+    rf"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Пон|Уто|Сре|Чет|Пет|Суб|Нед)?"
+    rf"\s*(\d{{1,2}}\s+(?:{ALL_MONTHS})\.?\s+\d{{4}})",
+    re.IGNORECASE
 )
 
 
@@ -188,6 +217,31 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
+
+
+def parse_date_flexible(date_str: str) -> Optional[datetime]:
+    date_str = date_str.replace(".", "").strip()
+    
+    srb_to_eng_months = {
+        "јан": "Jan", "feb": "Feb", "мар": "Mar", "апр": "Apr", "мај": "May", "јун": "Jun",
+        "јул": "Jul", "авг": "Aug", "сеп": "Sep", "окт": "Oct", "нов": "Nov", "дец": "Dec",
+        "jan": "Jan", "feb": "Feb", "mar": "Mar", "apr": "Apr", "may": "May", "jun": "Jun",
+        "jul": "Jul", "avg": "Aug", "sep": "Sep", "okt": "Oct", "nov": "Nov", "dec": "Dec"
+    }
+
+    for k, v in srb_to_eng_months.items():
+        if k in date_str.lower():
+            for part in date_str.split():
+                if k in part.lower():
+                    date_str = date_str.replace(part, v)
+                    break
+
+    for fmt in ("%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def safe_float(value: str) -> Optional[float]:
@@ -307,7 +361,6 @@ class UniversalCGMParser:
         except Exception as e:
             raise ValueError(f"Cannot open PDF: {str(e)}")
 
-        # Čitamo maksimalno prve 2 stranice gde su zbirni parametri i tabele
         max_pages = min(2, len(document))
 
         for page_number in range(max_pages):
@@ -419,7 +472,7 @@ class UniversalCGMParser:
             if self._is_descriptive_line(normalized):
                 continue
 
-            if re.search(r"\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b", text):
+            if DATE_PATTERN.search(text):
                 continue
 
             for match in NUMBER_PATTERN.finditer(text):
@@ -537,9 +590,6 @@ class UniversalCGMParser:
     def _pair_range_components(self):
         range_metrics = ["VERY_LOW", "LOW", "IN_RANGE", "HIGH", "VERY_HIGH"]
         anchors = [a for a in self.anchors if a["metric"] in range_metrics]
-        
-        # Filtriramo kandidate koji su na desnoj strani (grafikon sa opsezima, npr x > 300) 
-        # ili opšte procente, zavisno od layout-a. Za Linx gledamo desnu stranu gde su procenti opsega.
         candidates = [c for c in self.candidates if c["unit"] == "%"]
 
         result = {metric: None for metric in range_metrics}
@@ -580,12 +630,8 @@ class UniversalCGMParser:
                     continue
                 dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                 dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                
-                # Geometrijsko filtriranje: za opsege na desnoj strani (Linx grafikon)
-                # dajemo prednost kandidatima koji su desno od sidra (dx > 0)
                 if dy > 180:
                     continue
-                
                 score = dy + (dx * 0.20)
                 if anchor["region_id"] == candidate["region_id"]:
                     score -= 30
@@ -637,9 +683,7 @@ class UniversalCGMParser:
 
                     dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                     dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                    
-                    # Sprečavamo da metrički parametri kupe brojeve sa desnog grafikona
-                    if dx > 350 or dy > 150:
+                    if dx > 350 or dy > 180:
                         continue
 
                     score = dy + dx * 0.15
@@ -698,7 +742,8 @@ class UniversalCGMParser:
         for page_number in range(1, len(self.pages) + 1):
             page_words = sorted([w for w in self.words if w["page"] == page_number], key=lambda w: (w["y0"], w["x0"]))
             page_text = " ".join(w["text"] for w in page_words)
-            for date_text in DATE_PATTERN.findall(page_text):
+            for match in DATE_PATTERN.finditer(page_text):
+                date_text = match.group(1)
                 if date_text not in dates:
                     dates.append(date_text)
 
@@ -707,11 +752,9 @@ class UniversalCGMParser:
 
         parsed = []
         for date_text in dates:
-            try:
-                dt = datetime.strptime(date_text, "%d %b %Y")
+            dt = parse_date_flexible(date_text)
+            if dt:
                 parsed.append((dt, date_text))
-            except Exception:
-                pass
 
         if len(parsed) >= 2:
             parsed.sort(key=lambda x: x[0])
@@ -745,7 +788,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     parsed_data = {
         "patient_id": patient_id,
         "device_name": "Universal CGM Report",
-        "manufacturer": "Linx / Universal",
+        "manufacturer": "Multilingual / Universal",
         "tir": derived.get("TIR"),
         "tbr": derived.get("TBR"),
         "tar": derived.get("TAR"),
@@ -785,7 +828,7 @@ async def doctor_dashboard():
 
 HTML = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="sr">
 <head>
 <meta charset="UTF-8">
 <title>Universal CGM AGP Parser</title>
@@ -807,42 +850,42 @@ pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #e
 <div class="container">
 <div class="card">
 <h1>Universal CGM / AGP Parser</h1>
-<p>Upload any supported CGM AGP PDF to parse and sync with Supabase.</p>
+<p>Unesite bilo koji podržani CGM AGP PDF (engleski ili srpski) za parsiranje i sinhronizaciju.</p>
 <input id="file" type="file" accept=".pdf"><br><br>
-<button onclick="parseFile()">Parse & Save PDF</button>
+<button onclick="parseFile()">Parsiraj & Sačuvaj PDF</button>
 <a href="/dashboard" style="margin-left: 15px; color: #0d9488; font-weight: bold; text-decoration: none;">Idi na Lekarski Panel →</a>
 </div>
 <div id="result"></div>
 <div class="card">
 <h2>Debug JSON</h2>
-<pre id="json">No result yet.</pre>
+<pre id="json">Još uvek nema rezultata.</pre>
 </div>
 </div>
 <script>
 async function parseFile() {
     const fileInput = document.getElementById("file");
-    if (!fileInput.files.length) { alert("Choose a PDF first."); return; }
+    if (!fileInput.files.length) { alert("Izaberite PDF fajl."); return; }
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
-    document.getElementById("result").innerHTML = "<div class='card'>Parsing and syncing...</div>";
+    document.getElementById("result").innerHTML = "<div class='card'>Parsiranje i sinhronizacija u toku...</div>";
     try {
         const response = await fetch("/upload", { method: "POST", body: formData });
         const data = await response.json();
         renderResult(data.report);
         document.getElementById("json").textContent = JSON.stringify(data, null, 2);
     } catch (error) {
-        document.getElementById("result").innerHTML = "<div class='card'><b>Error:</b> " + error + "</div>";
+        document.getElementById("result").innerHTML = "<div class='card'><b>Greška:</b> " + error + "</div>";
     }
 }
 function renderResult(data) {
     if (!data.actual_components) { document.getElementById("result").innerHTML = "<pre>" + JSON.stringify(data, null, 2) + "</pre>"; return; }
     const a = data.actual_components; const d = data.derived_metrics;
-    let html = "<div class='card'><h2>Parser result</h2><p class='" + (data.status === "SUCCESS" ? "success" : "review") + "'>" + data.status + "</p>";
-    html += "<p>Period: " + (data.reporting_period.start || "?") + " → " + (data.reporting_period.end || "?") + "</p><h3>Metrics</h3><div class='grid'>";
-    html += metric("Average glucose", a.AVG_GLUCOSE, "mmol/L") + metric("GMI", a.GMI, "%") + metric("CV", a.CV, "%") + metric("CGM active", a.ACTIVE_TIME, "%");
-    html += "</div><h3>Ranges</h3><div class='grid'>";
-    html += metric("Very low", a.VERY_LOW, "%") + metric("Low", a.LOW, "%") + metric("In range", a.IN_RANGE, "%") + metric("High", a.HIGH, "%") + metric("Very high", a.VERY_HIGH, "%");
-    html += "</div><h3>Standardized</h3><div class='grid'>";
+    let html = "<div class='card'><h2>Rezultat parsiranja</h2><p class='" + (data.status === "SUCCESS" ? "success" : "review") + "'>" + data.status + "</p>";
+    html += "<p>Period: " + (data.reporting_period.start || "?") + " → " + (data.reporting_period.end || "?") + "</p><h3>Metrike</h3><div class='grid'>";
+    html += metric("Prosečna glukoza", a.AVG_GLUCOSE, "mmol/L") + metric("GMI", a.GMI, "%") + metric("CV", a.CV, "%") + metric("Aktivno vreme", a.ACTIVE_TIME, "%");
+    html += "</div><h3>Opsezi</h3><div class='grid'>";
+    html += metric("Vrlo nisko", a.VERY_LOW, "%") + metric("Nisko", a.LOW, "%") + metric("U opsegu", a.IN_RANGE, "%") + metric("Visoko", a.HIGH, "%") + metric("Vrlo visoko", a.VERY_HIGH, "%");
+    html += "</div><h3>Standardizovano</h3><div class='grid'>";
     html += metric("TBR", d.TBR, "%") + metric("TIR", d.TIR, "%") + metric("TAR", d.TAR, "%");
     html += "</div></div>";
     document.getElementById("result").innerHTML = html;
