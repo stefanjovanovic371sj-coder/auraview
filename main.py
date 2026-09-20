@@ -1,15 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
+import requests
 import pymupdf as fitz
-import json
+import re
 
 app = FastAPI()
-
-# ---------------------------------------------------------
-# POSTOJEĆI PRODUKCIONI ENDPOINTI (NETAKNUTI)
-# ---------------------------------------------------------
-# (Ovde ostaju tvoje postojeće / upload, /api/reports, / i /dashboard rute)
-# Radi preglednosti i sigurnosti, u nastavku dajemo celu datoteku sa novom rutom.
 
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
 SUPABASE_HEADERS = {
@@ -19,622 +14,427 @@ SUPABASE_HEADERS = {
     "Prefer": "return=representation"
 }
 
-# ---------------------------------------------------------
-# NOVA ISOLATED DEBUG PDF RUTA: /debug-pdf
-# ---------------------------------------------------------
+METRIC_ONTOLOGY = {
+    "TIR": {
+        "aliases": ["in range", "time in range", "u ciljnom opsegu"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "TAR": {
+        "aliases": ["high", "above range", "very high", "iznad opsega"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "TBR": {
+        "aliases": ["low", "below range", "very low", "ispod opsega"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "VERY_LOW": {
+        "aliases": ["very low"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "VERY_HIGH": {
+        "aliases": ["very high"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "GMI": {
+        "aliases": ["glucose management indicator", "gmi", "estimated a1c", "hba1c"],
+        "expected_role": "ACTUAL", "expected_unit": "DECIMAL", "valid_range": (4, 15)
+    },
+    "CV": {
+        "aliases": ["glucose variability", "coefficient of variation", "cv"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "ACTIVE_TIME": {
+        "aliases": ["time cgm active", "active time", "sensor active"],
+        "expected_role": "ACTUAL", "expected_unit": "%", "valid_range": (0, 100)
+    },
+    "AVG_GLUCOSE": {
+        "aliases": ["average glucose", "mean glucose"],
+        "expected_role": "ACTUAL", "expected_unit": "DECIMAL", "valid_range": (2, 25)
+    }
+}
 
-@app.get("/debug-pdf", response_class=HTMLResponse)
-def debug_pdf_ui():
-    return """
-    <!DOCTYPE html>
-    <html lang="sr">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>PDF Debug Viewer — PyMuPDF Inspector</title>
-        <style>
-            :root {
-                --bg: #0b0f19;
-                --card-bg: #111827;
-                --card-border: #1f2937;
-                --text: #f3f4f6;
-                --text-muted: #9ca3af;
-                --accent: #0ea5e9;
-                --accent-hover: #0284c7;
-                --success: #10b981;
-                --warning: #f59e0b;
-                --danger: #ef4444;
-            }
-            body {
-                font-family: system-ui, -apple-system, sans-serif;
-                background: var(--bg);
-                color: var(--text);
-                margin: 0;
-                padding: 20px;
-            }
-            .container { max-width: 1400px; margin: 0 auto; }
-            header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                border-bottom: 1px solid var(--card-border);
-                padding-bottom: 15px;
-                margin-bottom: 20px;
-            }
-            h1 { font-size: 22px; color: var(--accent); margin: 0; }
-            .badge {
-                background: rgba(14, 165, 233, 0.1);
-                color: var(--accent);
-                padding: 4px 10px;
-                border-radius: 9999px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            .card {
-                background: var(--card-bg);
-                border: 1px solid var(--card-border);
-                border-radius: 12px;
-                padding: 20px;
-                margin-bottom: 20px;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-            }
-            .upload-zone {
-                border: 2px dashed var(--card-border);
-                padding: 30px;
-                text-align: center;
-                border-radius: 8px;
-                cursor: pointer;
-                transition: border-color 0.2s;
-            }
-            .upload-zone:hover { border-color: var(--accent); }
-            input[type="file"] { color: var(--text); margin-bottom: 10px; }
-            button {
-                background: var(--accent);
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 6px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: background 0.2s;
-            }
-            button:hover { background: var(--accent-hover); }
-            button.secondary {
-                background: #374151;
-                margin-left: 10px;
-            }
-            button.secondary:hover { background: #4b5563; }
-            
-            .stats-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 15px;
-                margin-bottom: 20px;
-            }
-            .stat-card {
-                background: #1f2937;
-                padding: 15px;
-                border-radius: 8px;
-                border-left: 4px solid var(--accent);
-            }
-            .stat-value { font-size: 24px; font-weight: bold; margin-top: 5px; }
-            
-            tabs { display: flex; gap: 10px; margin-bottom: 15px; }
-            .tab-btn {
-                background: #1f2937;
-                color: var(--text-muted);
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                cursor: pointer;
-            }
-            .tab-btn.active { background: var(--accent); color: white; }
-            
-            pre, textarea {
-                background: #030712;
-                color: #34d399;
-                padding: 15px;
-                border-radius: 8px;
-                border: 1px solid var(--card-border);
-                font-family: ui-monospace, monospace;
-                font-size: 12px;
-                max-height: 400px;
-                overflow: auto;
-                width: 100%;
-                box-sizing: border-box;
-            }
-            
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                font-size: 13px;
-                margin-top: 10px;
-            }
-            th, td {
-                border: 1px solid var(--card-border);
-                padding: 8px 12px;
-                text-align: left;
-            }
-            th { background: #1f2937; color: var(--accent); }
-            tr:hover { background: rgba(255,255,255,0.02); }
-            
-            .viewer-container {
-                position: relative;
-                display: inline-block;
-                background: white;
-                border-radius: 8px;
-                overflow: auto;
-                max-width: 100%;
-                margin-top: 10px;
-            }
-            canvas { display: block; }
-            .word-box {
-                position: absolute;
-                border: 1px solid rgba(239, 68, 68, 0.6);
-                background: rgba(239, 68, 68, 0.15);
-                cursor: pointer;
-                box-sizing: border-box;
-            }
-            .word-box:hover {
-                border-color: #38bdf8;
-                background: rgba(56, 189, 248, 0.3);
-                z-index: 10;
-            }
-            .word-id {
-                position: absolute;
-                font-size: 8px;
-                color: #b91c1c;
-                font-weight: bold;
-                background: rgba(255,255,255,0.8);
-                padding: 0 2px;
-                pointer-events: none;
-            }
-            .block-box {
-                position: absolute;
-                border: 2px dashed rgba(16, 185, 129, 0.7);
-                background: rgba(16, 185, 129, 0.05);
-                pointer-events: none;
-                box-sizing: border-box;
-            }
-            .line-box {
-                position: absolute;
-                border: 1px dotted rgba(245, 158, 11, 0.7);
-                background: rgba(245, 158, 11, 0.05);
-                pointer-events: none;
-                box-sizing: border-box;
-            }
-            .controls-bar {
-                display: flex;
-                gap: 15px;
-                align-items: center;
-                margin-bottom: 15px;
-                flex-wrap: wrap;
-            }
-            label { font-size: 14px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; }
-            
-            .hidden { display: none; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <header>
-                <h1>PDF Debug Viewer <span class="badge">PyMuPDF Raw Inspector</span></h1>
-                <a href="/dashboard" style="color: var(--accent); text-decoration: none; font-size: 14px;">← Nazad na Dashboard</a>
-            </header>
+class UniversalCGMParser:
+    def __init__(self, doc):
+        self.doc = doc
+        self.pages = []
+        self.regions = []
+        self.candidates = []
+        self.anchors = []
+        self.results = {key: None for key in METRIC_ONTOLOGY.keys()}
+        self.reporting_period = {"start": None, "end": None}
 
-            <div class="card">
-                <h2>1. Upload PDF-a za Dijagnostiku</h2>
-                <form id="debugForm">
-                    <div class="upload-zone">
-                        <input type="file" id="pdfFile" accept=".pdf" required>
-                        <p style="margin: 5px 0 0 0; color: var(--text-muted); font-size: 13px;">Izaberi AGP PDF fajl za raw inspekciju</p>
-                    </div>
-                    <div style="margin-top: 15px; display: flex; gap: 10px;">
-                        <button type="submit">Pokreni Raw Analizu</button>
-                        <a id="downloadBtn" class="hidden" style="display:inline-block;"><button type="button" class="secondary">Download Debug JSON</button></a>
-                    </div>
-                </form>
-            </div>
+    def parse(self):
+        self._ingest_pdf()
+        self._build_layout()
+        self._classify_regions()
+        self._extract_candidates()
+        self._extract_anchors()
+        self._associate_labels_and_values()
+        self._aggregate_metrics()
+        self._validate_cluster()
+        self._extract_reporting_period()
+        return self._generate_final_report()
 
-            <div id="resultsSection" class="hidden">
-                <!-- 8. TEXT EXTRACTION SUMMARY -->
-                <div class="card">
-                    <h2>8. Text Extraction Summary</h2>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div style="color:var(--text-muted)">Ukupno stranica</div>
-                            <div class="stat-value" id="statPages">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div style="color:var(--text-muted)">Ukupno reči (Words)</div>
-                            <div class="stat-value" id="statWords">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div style="color:var(--text-muted)">Ukupno karaktera</div>
-                            <div class="stat-value" id="statChars">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div style="color:var(--text-muted)">Status sloja teksta</div>
-                            <div class="stat-value" id="statStatus" style="font-size:18px; color:var(--success)">-</div>
-                        </div>
-                    </div>
-                    <div id="pagesSummaryList"></div>
-                </div>
-
-                <!-- 5. VISUAL WORD MAP & 6 & 7 VIEWS -->
-                <div class="card">
-                    <h2>Visual Layout & Bounding Box Inspector</h2>
-                    <div class="controls-bar">
-                        <label><input type="checkbox" id="chkBoxes" checked> Show word boxes</label>
-                        <label><input type="checkbox" id="chkIds" checked> Show word IDs</label>
-                        <label><input type="checkbox" id="chkBlocks"> Show PDF blocks</label>
-                        <label><input type="checkbox" id="chkLines"> Show PDF lines</label>
-                        <div style="margin-left: auto;">
-                            <label>Stranica: <select id="pageSelector" style="background:#030712; color:white; border:1px solid var(--card-border); padding:4px 8px; border-radius:4px;"></select></label>
-                        </div>
-                    </div>
-                    <div style="text-align: center; background: #030712; padding: 10px; border-radius: 8px;">
-                        <div class="viewer-container" id="viewerContainer">
-                            <canvas id="pdfCanvas"></canvas>
-                            <div id="overlayLayer" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></div>
-                        </div>
-                    </div>
-                    <div id="tokenDetails" style="margin-top: 10px; padding: 10px; background: #030712; border-radius: 6px; font-size: 13px; color: var(--text-muted);">
-                        Klikni na bilo koji word box iznad da vidiš njegove sirove parametre.
-                    </div>
-                </div>
-
-                <!-- 2. RAW get_text() OUTPUT -->
-                <div class="card">
-                    <h2>2. Raw get_text() Output</h2>
-                    <p style="color: var::text-muted; font-size: 13px;">Tačan sirovi tekst stranice vraćen direktno sa page.get_text()</p>
-                    <textarea id="rawTextOutput" readonly rows="8"></textarea>
-                </div>
-
-                <!-- 3 & 4. RAW WORDS TABLE & COMPARISON -->
-                <div class="card">
-                    <h2>3 & 4. Raw Words (Original Order vs Geometric Order)</h2>
-                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                        <button class="tab-btn active" onclick="switchTableTab('raw')" id="btnTabRaw">A) Raw Order (PyMuPDF stream)</button>
-                        <button class="tab-btn" onclick="switchTableTab('geo')" id="btnTabGeo">B) Geometric Order (y0 → x0)</button>
-                    </div>
-                    <div style="max-height: 400px; overflow-y: auto;">
-                        <table id="wordsTable">
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <th>Text</th>
-                                    <th>x0</th>
-                                    <th>y0</th>
-                                    <th>x1</th>
-                                    <th>y1</th>
-                                    <th>Block</th>
-                                    <th>Line</th>
-                                    <th>Word No</th>
-                                    <th>Page</th>
-                                </tr>
-                            </thead>
-                            <tbody id="wordsTableBody"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-        <script>
-            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-            let debugData = null;
-            let pdfDoc = null;
-            let currentFileArrayBuffer = null;
-            let activeTableMode = 'raw';
-            let currentPageNum = 1;
-
-            document.getElementById('debugForm').onsubmit = async (e) => {
-                e.preventDefault();
-                const fileInput = document.getElementById('pdfFile');
-                if(!fileInput.files[0]) return;
-
-                const file = fileInput.files[0];
-                currentFileArrayBuffer = await file.arrayBuffer();
-                
-                // Load into PDF.js for rendering
-                const loadingTask = pdfjsLib.getDocument({ data: currentFileArrayBuffer.slice(0) });
-                pdfDoc = await loadingTask.promise;
-
-                const fd = new FormData();
-                fd.append('file', file);
-
-                const submitBtn = e.target.querySelector('button[type="submit"]');
-                submitBtn.innerText = "Učitavanje i analiza...";
-                
-                try {
-                    const res = await fetch('/debug-pdf-inspect', { method: 'POST', body: fd });
-                    debugData = await res.json();
-                    
-                    if(debugData.status === "success") {
-                        renderDiagnostic(debugData.diagnostic);
-                        document.getElementById('resultsSection').classList.remove('hidden');
-                        
-                        // Setup download JSON button
-                        const jsonStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(debugData.diagnostic, null, 2));
-                        const downloadBtn = document.getElementById('downloadBtn');
-                        downloadBtn.setAttribute("href", jsonStr);
-                        downloadBtn.setAttribute("download", "pdf_raw_debug.json");
-                        downloadBtn.classList.remove('hidden');
-                    } else {
-                        alert("Greška: " + debugData.detail);
-                    }
-                } catch(err) {
-                    alert("Došlo je do greške: " + err);
-                } finally {
-                    submitBtn.innerText = "Pokreni Raw Analizu";
-                }
-            };
-
-            function renderDiagnostic(diag) {
-                // 8. SUMMARY
-                document.getElementById('statPages').innerText = diag.document.page_count;
-                document.getElementById('statWords').innerText = diag.total_words;
-                document.getElementById('statChars').innerText = diag.total_chars;
-                
-                const hasText = diag.total_words > 0;
-                const statusEl = document.getElementById('statStatus');
-                statusEl.innerText = hasText ? "OK (Text Layer Found)" : "NO TEXT LAYER — OCR REQUIRED";
-                statusEl.style.color = hasText ? "var(--success)" : "var(--danger)";
-
-                // Populate page selector
-                const sel = document.getElementById('pageSelector');
-                sel.innerHTML = "";
-                diag.pages.forEach(p => {
-                    const opt = document.createElement('option');
-                    opt.value = p.page;
-                    opt.innerText = `Stranica ${p.page} (${p.word_count} reči)`;
-                    sel.appendChild(opt);
-                });
-                sel.onchange = (e) => {
-                    currentPageNum = parseInt(e.target.value);
-                    renderPageVisuals(currentPageNum);
-                };
-
-                currentPageNum = 1;
-                renderPageVisuals(1);
-                updateTables();
-            }
-
-            async function renderPageVisuals(pageNum) {
-                if(!pdfDoc) return;
-                const pageData = debugData.diagnostic.pages.find(p => p.page === pageNum);
-                if(!pageData) return;
-
-                // Update raw text output
-                document.getElementById('rawTextOutput').value = pageData.raw_text;
-
-                // Render PDF page via PDF.js
-                const page = await pdfDoc.getPage(pageNum);
-                const viewport = page.getViewport({ scale: 1.5 });
-                
-                const canvas = document.getElementById('pdfCanvas');
-                const context = canvas.getContext('2d');
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-
-                await page.render({ canvasContext: context, viewport: viewport }).promise;
-
-                // Render Overlays
-                renderOverlays(pageData, viewport);
-            }
-
-            function renderOverlays(pageData, viewport) {
-                const overlay = document.getElementById('overlayLayer');
-                overlay.innerHTML = "";
-
-                // Scale factors because PyMuPDF coordinates map to original PDF points, and viewport is scaled
-                const scaleX = viewport.width / pageData.width;
-                const scaleY = viewport.height / pageData.height;
-
-                const showBoxes = document.getElementById('chkBoxes').checked;
-                const showIds = document.getElementById('chkIds').checked;
-                const showBlocks = document.getElementById('chkBlocks').checked;
-                const showLines = document.getElementById('chkLines').checked;
-
-                // 6. BLOCK VIEW
-                if(showBlocks) {
-                    const blocksMap = {};
-                    pageData.words.forEach(w => {
-                        if(!blocksMap[w.block]) blocksMap[w.block] = [];
-                        blocksMap[w.block].push(w);
-                    });
-                    Object.keys(blocksMap).forEach(bId => {
-                        const words = blocksMap[bId];
-                        const x0 = Math.min(...words.map(w => w.x0)) * scaleX;
-                        const y0 = Math.min(...words.map(w => w.y0)) * scaleY;
-                        const x1 = Math.max(...words.map(w => w.x1)) * scaleX;
-                        const y1 = Math.max(...words.map(w => w.y1)) * scaleY;
-
-                        const div = document.createElement('div');
-                        div.className = 'block-box';
-                        div.style.left = x0 + 'px';
-                        div.style.top = y0 + 'px';
-                        div.style.width = (x1 - x0) + 'px';
-                        div.style.height = (y1 - y0) + 'px';
-                        overlay.appendChild(div);
-                    });
-                }
-
-                // 7. LINE VIEW
-                if(showLines) {
-                    const linesMap = {};
-                    pageData.words.forEach(w => {
-                        const key = `${w.block}_${w.line}`;
-                        if(!linesMap[key]) linesMap[key] = [];
-                        linesMap[key].push(w);
-                    });
-                    Object.keys(linesMap).forEach(lKey => {
-                        const words = linesMap[lKey];
-                        const x0 = Math.min(...words.map(w => w.x0)) * scaleX;
-                        const y0 = Math.min(...words.map(w => w.y0)) * scaleY;
-                        const x1 = Math.max(...words.map(w => w.x1)) * scaleX;
-                        const y1 = Math.max(...words.map(w => w.y1)) * scaleY;
-
-                        const div = document.createElement('div');
-                        div.className = 'line-box';
-                        div.style.left = x0 + 'px';
-                        div.style.top = y0 + 'px';
-                        div.style.width = (x1 - x0) + 'px';
-                        div.style.height = (y1 - y0) + 'px';
-                        overlay.appendChild(div);
-                    });
-                }
-
-                // 5. VISUAL WORD MAP
-                pageData.words.forEach((w, idx) => {
-                    const x0 = w.x0 * scaleX;
-                    const y0 = w.y0 * scaleY;
-                    const x1 = w.x1 * scaleX;
-                    const y1 = w.y1 * scaleY;
-
-                    if(showBoxes) {
-                        const box = document.createElement('div');
-                        box.className = 'word-box';
-                        box.style.left = x0 + 'px';
-                        box.style.top = y0 + 'px';
-                        box.style.width = Math.max(2, x1 - x0) + 'px';
-                        box.style.height = Math.max(2, y1 - y0) + 'px';
-                        box.style.pointerEvents = 'auto';
-                        
-                        box.onclick = () => {
-                            document.getElementById('tokenDetails').innerHTML = `
-                                <strong>Word #${idx+1}</strong> | Text: <code>"${w.text}"</code> | 
-                                BBox: [${w.x0}, ${w.y0}, ${w.x1}, ${w.y1}] | 
-                                Block: ${w.block} | Line: ${w.line} | Word No: ${w.word_no} | Page: ${w.page}
-                            `;
-                        };
-                        overlay.appendChild(box);
-                    }
-
-                    if(showIds) {
-                        const idEl = document.createElement('div');
-                        idEl.className = 'word-id';
-                        idEl.style.left = x0 + 'px';
-                        idEl.style.top = (y0 - 10 > 0 ? y0 - 10 : y0) + 'px';
-                        idEl.innerText = `W${idx+1}`;
-                        overlay.appendChild(idEl);
-                    }
-                });
-            }
-
-            // Checkbox event listeners to re-render overlay
-            ['chkBoxes', 'chkIds', 'chkBlocks', 'chkLines'].forEach(id => {
-                document.getElementById(id).onchange = () => renderPageVisuals(currentPageNum);
-            });
-
-            function switchTableTab(mode) {
-                activeTableMode = mode;
-                document.getElementById('btnTabRaw').className = mode === 'raw' ? 'tab-btn active' : 'tab-btn';
-                document.getElementById('btnTabGeo').className = mode === 'geo' ? 'tab-btn active' : 'tab-btn';
-                updateTables();
-            }
-
-            function updateTables() {
-                if(!debugData) return;
-                const pageData = debugData.diagnostic.pages.find(p => p.page === currentPageNum);
-                if(!pageData) return;
-
-                let wordsList = [...pageData.words];
-                if(activeTableMode === 'geo') {
-                    wordsList.sort((a, b) => {
-                        if(a.page !== b.page) return a.page - b.page;
-                        if(Math.abs(a.y0 - b.y0) > 3) return a.y0 - b.y0;
-                        return a.x0 - b.x0;
-                    });
-                }
-
-                const tbody = document.getElementById('wordsTableBody');
-                tbody.innerHTML = "";
-                wordsList.forEach((w, idx) => {
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td>${idx + 1}</td>
-                        <td><strong>${w.text}</strong></td>
-                        <td>${w.x0}</td>
-                        <td>${w.y0}</td>
-                        <td>${w.x1}</td>
-                        <td>${w.y1}</td>
-                        <td>${w.block}</td>
-                        <td>${w.line}</td>
-                        <td>${w.word_no}</td>
-                        <td>${w.page}</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-            }
-        </script>
-    </body>
-    </html>
-    """
-
-@app.post("/debug-pdf-inspect")
-async def debug_pdf_inspect(file: UploadFile = File(...)):
-    try:
-        content = await file.read()
-        doc = fitz.open(stream=content, filetype="pdf")
-        
-        page_count = len(doc)
-        metadata = doc.metadata
-        
-        pages_diagnostic = []
-        total_words_count = 0
-        total_chars_count = 0
-        
-        for page_num in range(page_count):
-            page = doc[page_num]
-            rect = page.rect
-            width = rect.width
-            height = rect.height
-            
-            raw_text = page.get_text()
+    def _ingest_pdf(self):
+        """1. RAW PyMuPDF Extraction sa očuvanjem originalnog redosleda tokena."""
+        for page_num, page in enumerate(self.doc):
             words_raw = page.get_text("words")
-            
-            total_chars_count += len(raw_text)
-            total_words_count += len(words_raw)
-            
-            formatted_words = []
+            page_words = []
             for idx, w in enumerate(words_raw):
-                formatted_words.append({
-                    "text": w[4],
-                    "x0": round(w[0], 2),
-                    "y0": round(w[1], 2),
-                    "x1": round(w[2], 2),
-                    "y1": round(w[3], 2),
-                    "block": w[5],
-                    "line": w[6],
-                    "word_no": idx,
-                    "page": page_num + 1
-                })
-                
-            pages_diagnostic.append({
-                "page": page_num + 1,
-                "width": round(width, 2),
-                "height": round(height, 2),
-                "text_length": len(raw_text),
-                "word_count": len(formatted_words),
-                "has_text_layer": len(formatted_words) > 0,
-                "raw_text": raw_text,
-                "words": formatted_words
+                text = w[4].strip()
+                if text:
+                    page_words.append({
+                        "word_no": idx,
+                        "text": text,
+                        "x0": w[0], "y0": w[1], "x1": w[2], "y1": w[3],
+                        "cx": (w[0] + w[2]) / 2, "cy": (w[1] + w[3]) / 2,
+                        "block": w[5], "line": w[6], "page": page_num + 1
+                    })
+            self.pages.append({
+                "page_num": page_num + 1,
+                "width": page.rect.width,
+                "height": page.rect.height,
+                "raw_words": page_words
             })
+
+    def _build_layout(self):
+        """2. Dokument -> Page -> Block -> Line -> Token hijerarhija bez uništavanja raw ordra."""
+        region_counter = 0
+        for page in self.pages:
+            # Derivirani geometrijski pogled za linije i regije (ne dira raw_words)
+            sorted_words = sorted(page["raw_words"], key=lambda w: (w["y0"], w["x0"]))
             
-        diagnostic_result = {
-            "document": {
-                "page_count": page_count,
-                "metadata": metadata
-            },
-            "total_words": total_words_count,
-            "total_chars": total_chars_count,
-            "pages": pages_diagnostic
-        }
+            lines_map = {}
+            for w in sorted_words:
+                line_key = (w["block"], w["line"])
+                if line_key not in lines_map:
+                    lines_map[line_key] = []
+                lines_map[line_key].append(w)
+            
+            # Formiranje linija iz mapiranih tokena
+            lines = list(lines_map.values())
+            lines.sort(key=lambda l: l[0]["y0"])
+
+            # Grupisanje linija u vizuelne regione (blokove)
+            current_region_lines = []
+            for line in lines:
+                if not current_region_lines:
+                    current_region_lines.append(line)
+                else:
+                    last_line_y = current_region_lines[-1][0]["y0"]
+                    curr_line_y = line[0]["y0"]
+                    if curr_line_y - last_line_y < 30:
+                        current_region_lines.append(line)
+                    else:
+                        region_counter += 1
+                        self._register_region(region_counter, current_region_lines, page["page_num"])
+                        current_region_lines = [line]
+            if current_region_lines:
+                region_counter += 1
+                self._register_region(region_counter, current_region_lines, page["page_num"])
+
+    def _register_region(self, reg_id, lines, page_num):
+        x0 = min(w["x0"] for line in lines for w in line)
+        y0 = min(w["y0"] for line in lines for w in line)
+        x1 = max(w["x1"] for line in lines for w in line)
+        y1 = max(w["y1"] for line in lines for w in line)
         
-        return JSONResponse(content={"status": "success", "diagnostic": diagnostic_result})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        flat_words = [w for line in lines for w in line]
+        text = " ".join([w["text"] for w in flat_words]).lower()
+        
+        self.regions.append({
+            "region_id": f"reg_{page_num}_{reg_id}",
+            "page": page_num,
+            "bbox": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+            "text": text,
+            "lines": lines,
+            "words": flat_words,
+            "context_type": "UNKNOWN"
+        })
+
+    def _classify_regions(self):
+        """Određivanje regionalnog konteksta (GOAL_ZONE vs ACTUAL_ZONE)."""
+        for r in self.regions:
+            if any(k in r["text"] for k in ["goal", "goals", "target range 3.9", "cilj", "glucose ranges goals"]):
+                r["context_type"] = "GOAL_ZONE"
+            elif any(k in r["text"] for k in ["in range", "very low", "low", "high", "very high"]):
+                r["context_type"] = "ACTUAL_ZONE"
+
+    def _extract_candidates(self):
+        """Precizno vezivanje numeričkog kandidata za STVARNE tokene i njihove bbox-ove."""
+        for r in self.regions:
+            for line in r["lines"]:
+                line_text = " ".join([w["text"] for w in line])
+                line_text_lower = line_text.lower()
+                
+                # Pretraga brojeva sa opcionalnim operatorima i procentima
+                matches = re.finditer(r'([<>]?)\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(%)?', line_text)
+                for match in matches:
+                    operator = match.group(1)
+                    val_str = match.group(2)
+                    has_percent = bool(match.group(3))
+                    val = float(val_str.replace(',', '.'))
+                    
+                    # Pronalaženje tačnih reči/tokena koji čine ovaj broj u liniji
+                    matched_words = [w for w in line if val_str in w["text"] or (has_percent and "%" in w["text"]) or w["text"] in [operator, val_str, val_str+"%"]]
+                    if not matched_words:
+                        matched_words = line # fallback na celu liniju ako token nije izlolovan
+                    
+                    bx0 = min(w["x0"] for w in matched_words)
+                    by0 = min(w["y0"] for w in matched_words)
+                    bx1 = max(w["x1"] for w in matched_words)
+                    by1 = max(w["y1"] for w in matched_words)
+                    
+                    # Semantic role classification
+                    role = "UNKNOWN"
+                    reason = []
+                    
+                    if operator:
+                        role = "GOAL"
+                        reason.append("GOAL_OPERATOR_DETECTED")
+                    elif "goal" in line_text_lower or "target range" in line_text_lower:
+                        role = "GOAL"
+                        reason.append("INLINE_GOAL_CONTEXT")
+                    elif r["context_type"] == "GOAL_ZONE":
+                        role = "GOAL"
+                        reason.append("REGION_GOAL_CONTEXT")
+                    elif r["context_type"] == "ACTUAL_ZONE" or not operator:
+                        role = "ACTUAL"
+                        reason.append("ACTUAL_ZONE_CONTEXT" if r["context_type"] == "ACTUAL_ZONE" else "DEFAULT_ACTUAL")
+                    
+                    self.candidates.append({
+                        "raw_text": match.group(0),
+                        "value": val,
+                        "unit": "%" if has_percent else "DECIMAL",
+                        "type": "PERCENT" if has_percent else "DECIMAL",
+                        "semantic_role": role,
+                        "bbox": {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1, "cx": (bx0+bx1)/2, "cy": (by0+by1)/2},
+                        "page": line[0]["page"],
+                        "region_id": r["region_id"],
+                        "reason_codes": reason,
+                        "line_text": line_text_lower
+                    })
+
+    def _extract_anchors(self):
+        for r in self.regions:
+            for line in r["lines"]:
+                line_text = " ".join([w["text"] for w in line]).lower()
+                line_y = line[0]["cy"]
+                for m_key, m_data in METRIC_ONTOLOGY.items():
+                    for alias in m_data["aliases"]:
+                        if alias in line_text:
+                            if not any(a["metric"] == m_key and a["page"] == r["page"] and abs(a["cy"] - line_y) < 10 for a in self.anchors):
+                                self.anchors.append({
+                                    "metric": m_key,
+                                    "expected_role": m_data["expected_role"],
+                                    "expected_unit": m_data["expected_unit"],
+                                    "raw_text": alias,
+                                    "page": r["page"],
+                                    "region_id": r["region_id"],
+                                    "cy": line_y,
+                                    "cx": sum(w["cx"] for w in line) / len(line),
+                                    "bbox": {"x0": line[0]["x0"], "y0": line[0]["y0"], "x1": line[-1]["x1"], "y1": line[-1]["y1"]}
+                                })
+
+    def _associate_labels_and_values(self):
+        """Povezivanje labela i vrednosti preko uloga, regiona i preciznih bbox-ova."""
+        for anchor in self.anchors:
+            valid_candidates = []
+            for c in self.candidates:
+                if c["page"] != anchor["page"]: continue
+                if anchor["expected_role"] == "ACTUAL" and c["semantic_role"] == "GOAL": continue
+                if c["unit"] != anchor["expected_unit"]: continue
+                
+                v_min, v_max = METRIC_ONTOLOGY[anchor["metric"]]["valid_range"]
+                if not (v_min <= c["value"] <= v_max): continue
+                
+                y_diff = abs(c["bbox"]["cy"] - anchor["cy"])
+                x_diff = abs(c["bbox"]["cx"] - anchor["cx"])
+                
+                # Restriktivno mapiranje unutar istog regiona ili bliske linije
+                if y_diff < 35 or (c["region_id"] == anchor["region_id"] and y_diff < 60):
+                    score = 0.6
+                    evidence = ["ROLE_MATCH", "UNIT_MATCH"]
+                    if y_diff < 15: 
+                        score += 0.2
+                        evidence.append("CLOSE_VERTICAL_PROXIMITY")
+                    if c["region_id"] == anchor["region_id"]:
+                        score += 0.2
+                        evidence.append("SAME_REGION")
+                        
+                    valid_candidates.append({
+                        "candidate": c,
+                        "score": score,
+                        "distance": x_diff + (y_diff * 2),
+                        "evidence": evidence
+                    })
+            
+            if valid_candidates:
+                valid_candidates.sort(key=lambda x: (-x["score"], x["distance"]))
+                best = valid_candidates[0]
+                current_result = self.results[anchor["metric"]]
+                
+                if not current_result or best["score"] > current_result["confidence"]:
+                    self.results[anchor["metric"]] = {
+                        "value": best["candidate"]["value"],
+                        "confidence": round(best["score"], 2),
+                        "status": "OK" if best["score"] >= 0.8 else "MANUAL_REVIEW",
+                        "semantic_role": best["candidate"]["semantic_role"],
+                        "page": anchor["page"],
+                        "source": {
+                            "label_text": anchor["raw_text"],
+                            "value_text": best["candidate"]["raw_text"],
+                            "label_bbox": anchor["bbox"],
+                            "value_bbox": best["candidate"]["bbox"],
+                            "region_id": best["candidate"]["region_id"]
+                        },
+                        "reason_codes": best["evidence"] + best["candidate"]["reason_codes"]
+                    }
+
+    def _aggregate_metrics(self):
+        """Agregacija komponenti u skladu sa zahtevom (TBR = Very low + Low, TAR = High + Very high)."""
+        # TBR agregacija
+        tbr_res = self.results["TBR"]
+        vl_res = self.results["VERY_LOW"]
+        if vl_res and tbr_res and vl_res["value"] is not None and tbr_res["value"] is not None:
+            if vl_res["source"]["region_id"] == tbr_res["source"]["region_id"]:
+                self.results["TBR"]["value"] = round(vl_res["value"] + tbr_res["value"], 1)
+                self.results["TBR"]["reason_codes"].append("AGGREGATED_VERY_LOW_AND_LOW")
+
+        # TAR agregacija
+        tar_res = self.results["TAR"]
+        vh_res = self.results["VERY_HIGH"]
+        if vh_res and tar_res and vh_res["value"] is not None and tar_res["value"] is not None:
+            if vh_res["source"]["region_id"] == tar_res["source"]["region_id"]:
+                self.results["TAR"]["value"] = round(vh_res["value"] + tar_res["value"], 1)
+                self.results["TAR"]["reason_codes"].append("AGGREGATED_HIGH_AND_VERY_HIGH")
+
+    def _validate_cluster(self):
+        tir = self.results["TIR"]
+        tar = self.results["TAR"]
+        tbr = self.results["TBR"]
+        if tir and tar and tbr and all(v and v["value"] is not None for v in [tir, tar, tbr]):
+            total = tir["value"] + tar["value"] + tbr["value"]
+            if 98 <= total <= 102:
+                for metric in [tir, tar, tbr]:
+                    metric["confidence"] = min(1.0, metric["confidence"] + 0.1)
+                    metric["status"] = "OK"
+                    metric["reason_codes"].append("VALIDated_BY_CLUSTER_SUM_100")
+
+    def _extract_reporting_period(self):
+        date_pattern = r'\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b'
+        for page in self.pages:
+            full_page_text = " ".join([w["text"] for w in page["raw_words"]])
+            dates = re.findall(date_pattern, full_page_text)
+            if len(dates) >= 2:
+                self.reporting_period["start"] = dates[0]
+                self.reporting_period["end"] = dates[1]
+                break
+
+    def _generate_final_report(self):
+        final_metrics = {}
+        for key, res in self.results.items():
+            if key in ["VERY_LOW", "VERY_HIGH"]: continue
+            if res: 
+                final_metrics[key] = res
+            else: 
+                final_metrics[key] = {
+                    "value": None,
+                    "confidence": 0.0,
+                    "status": "MANUAL_REVIEW",
+                    "semantic_role": "UNKNOWN",
+                    "reason_codes": ["NOT_FOUND_OR_UNCERTAIN"]
+                }
+        return {
+            "status": "SUCCESS",
+            "manufacturer": "Unknown",
+            "reporting_period": self.reporting_period,
+            "metrics": final_metrics
+        }
+
+# --- PRODUKCIONE RUTE (Netaknute) ---
+
+@app.post("/upload")
+async def upload_report(file: UploadFile = File(...)):
+    content = await file.read()
+    doc = fitz.open(stream=content, filetype="pdf")
+    patient_id = "P-000127"
+    
+    patient_check = requests.get(f"{SUPABASE_URL}/rest/v1/patients?patient_id=eq.{patient_id}", headers=SUPABASE_HEADERS)
+    if not patient_check.json():
+        requests.post(f"{SUPABASE_URL}/rest/v1/patients", headers=SUPABASE_HEADERS, json={"patient_id": patient_id, "name": "Stefan Jovanović"})
+    
+    parser = UniversalCGMParser(doc)
+    extracted = parser.parse()
+    
+    metrics = extracted["metrics"]
+    parsed_data = {
+        "patient_id": patient_id, 
+        "device_name": "CGM Izveštaj", 
+        "manufacturer": "mySugr / Standardni CGM",
+        "tir": metrics["TIR"]["value"] if metrics["TIR"] else None, 
+        "tbr": metrics["TBR"]["value"] if metrics["TBR"] else None, 
+        "tar": metrics["TAR"]["value"] if metrics["TAR"] else None,
+        "gmi_percent": metrics["GMI"]["value"] if metrics["GMI"] else None, 
+        "cv": metrics["CV"]["value"] if metrics["CV"] else None, 
+        "active_time": str(metrics["ACTIVE_TIME"]["value"]) + "%" if metrics["ACTIVE_TIME"] and metrics["ACTIVE_TIME"]["value"] is not None else None
+    }
+    
+    response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data)
+    if response.status_code not in [200, 201]: 
+        raise HTTPException(status_code=500, detail=f"Baza odbila: {response.text}")
+        
+    return {"status": "success", "data": parsed_data, "engine_report": extracted}
+
+@app.get("/api/reports")
+def get_reports():
+    return requests.get(f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc", headers=SUPABASE_HEADERS).json()
+
+@app.get("/", response_class=HTMLResponse)
+def patient_form():
+    return """
+<!DOCTYPE html>
+<html lang="sr"><head><meta charset="UTF-8"><title>Aura View</title></head>
+<body style="font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#f4f6f9;">
+<div style="background:white; padding:30px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); width:100%; max-width:400px; text-align:center;">
+<h2>Slanje AGP Izveštaja</h2>
+<form id="f"><input type="file" id="fi" accept=".pdf" required style="margin:20px 0;"><br>
+<button type="submit" style="background:#0d9488; color:white; border:none; padding:12px 20px; border-radius:6px; width:100%; font-weight:bold; cursor:pointer;">Pošalji Lekaru</button></form>
+<p id="s" style="margin-top:15px; font-weight:500;"></p></div>
+<script>
+document.getElementById('f').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(); fd.append('file', document.getElementById('fi').files[0]);
+    document.getElementById('s').innerText = "Obrada u toku...";
+    const res = await fetch('/upload', { method: 'POST', body: fd });
+    if(res.ok) document.getElementById('s').innerText = "Izveštaj uspešno sačuvan!";
+    else document.getElementById('s').innerText = "Greška pri obradi.";
+};
+</script></body></html>
+"""
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def doctor_dashboard():
+    return """
+<!DOCTYPE html><html lang="sr"><head><meta charset="UTF-8"><title>Panel</title></head>
+<body style="background:#0f172a; color:#f8fafc; padding:20px;">
+<h2>Dr Marko Jovanović — Live Panel</h2>
+<div id="c">Učitavanje vreme...</div>
+<script>
+async function load() {
+    const res = await fetch('/api/reports');
+    const data = await res.json();
+    document.getElementById('c').innerHTML = data.map(r => `<div style="background:#1e293b; padding:15px; margin-bottom:10px; border-radius:8px; border:1px solid #334155;">
+    <strong>Pacijent: ${r.patient_id}</strong> — <span style="color:#38bdf8;">${r.device_name || 'CGM'}</span><br><br>
+    TIR: <span style="color:#4ade80; font-size:20px; font-weight:bold;">${r.tir !== null ? r.tir + '%' : '-'}</span> | 
+    TBR: <span style="color:#f87171;">${r.tbr !== null ? r.tbr + '%' : '-'}</span> | 
+    TAR: <span style="color:#fbbf24;">${r.tar !== null ? r.tar + '%' : '-'}</span> | 
+    GMI: ${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'} | 
+    CV: ${r.cv !== null ? r.cv + '%' : '-'} | 
+    Aktivno: ${r.active_time || '-'}
+    </div>`).join('');
+}
+load();
+setInterval(load, 5000);
+</script></body></html>
+"""
