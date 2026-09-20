@@ -1,102 +1,87 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
-import requests
-import pymupdf as fitz
+from fastapi.responses import HTMLResponse
+import fitz  # PyMuPDF
 import re
+import math
+import os
+import requests
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, List, Any, Tuple
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-app = FastAPI(title="Universal CGM AGP Parser")
-
-
-# Development / MVP configuration.
-# For production these should be moved to environment variables.
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
-
 SUPABASE_KEY = "sb_publishable_Dgu75wMHYMifHkuVTGgmpg_-czgDx39"
 
-SUPABASE_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation",
-}
+MAX_FILE_SIZE_MB = 15
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+
+app = FastAPI(
+    title="Universal CGM AGP Parser",
+    version="2.0.0"
+)
 
 
 # ============================================================
-# UNIVERSAL CGM SEMANTIC ONTOLOGY
+# METRIC DEFINITIONS
 # ============================================================
 
-METRIC_ONTOLOGY = {
+METRICS = {
 
     "VERY_LOW": {
         "aliases": [
             "very low",
-            "very low glucose",
-            "extremely low",
+            "very-low"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
     },
 
     "LOW": {
         "aliases": [
-            "low",
-            "low glucose",
-            "below range",
+            "low"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
     },
 
     "IN_RANGE": {
         "aliases": [
             "in range",
-            "time in range",
-            "tir",
-            "within range",
-            "within target",
-            "target range",
-            "in target",
-            "u ciljnom opsegu",
-            "u opsegu",
+            "in-range",
+            "time in range"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
     },
 
     "HIGH": {
         "aliases": [
-            "high",
-            "high glucose",
-            "above range",
+            "high"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
     },
 
     "VERY_HIGH": {
         "aliases": [
             "very high",
-            "very high glucose",
-            "extremely high",
+            "very-high"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "RANGE_COMPONENT"
     },
 
     "GMI": {
         "aliases": [
             "glucose management indicator",
-            "gmi",
+            "gmi"
         ],
-        "expected_unit": "%",
-        "valid_range": (4, 15),
+        "unit": "%",
+        "type": "METRIC"
     },
 
     "CV": {
@@ -104,72 +89,59 @@ METRIC_ONTOLOGY = {
             "glucose variability",
             "coefficient of variation",
             "percent coefficient of variation",
-            "cv",
+            "cv"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "METRIC"
     },
 
     "ACTIVE_TIME": {
         "aliases": [
             "time cgm active",
+            "time cgM active",
             "cgm active",
-            "sensor active",
-            "time active",
             "active time",
-            "percent time active",
+            "sensor active"
         ],
-        "expected_unit": "%",
-        "valid_range": (0, 100),
+        "unit": "%",
+        "type": "METRIC"
     },
 
     "AVG_GLUCOSE": {
         "aliases": [
             "average glucose",
-            "mean glucose",
-            "average sensor glucose",
-            "mean sensor glucose",
+            "mean glucose"
         ],
-        "expected_unit": "GLUCOSE",
-        "valid_range": (1, 35),
-    },
+        "unit": "GLUCOSE",
+        "type": "METRIC"
+    }
 }
 
 
 # ============================================================
-# GENERAL CONSTANTS
+# DATE PATTERNS
 # ============================================================
 
-GOAL_TERMS = [
-    "goal",
-    "goals",
-    "target",
-    "recommended",
-    "recommendation",
-    "reference",
-    "desired",
-    "clinical target",
-    "clinical targets",
-    "aim",
-]
+MONTHS = (
+    "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+)
 
-DESCRIPTIVE_TERMS = [
-    "median",
-    "percentile",
-    "percentiles",
-    "of time in ranges",
-    "defined as",
-]
+DATE_PATTERN = re.compile(
+    rf"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?"
+    rf"\s*(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})"
+)
 
-GLUCOSE_UNITS = [
-    "mmol/l",
-    "mmol",
-    "mg/dl",
-]
 
-DATE_MONTHS = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+# ============================================================
+# NUMERIC PATTERN
+# ============================================================
+
+NUMBER_PATTERN = re.compile(
+    r"(?P<operator>[<>≤≥]?)"
+    r"\s*"
+    r"(?P<number>\d{1,3}(?:[.,]\d{1,2})?)"
+    r"\s*"
+    r"(?P<percent>%?)"
 )
 
 
@@ -178,86 +150,78 @@ DATE_MONTHS = (
 # ============================================================
 
 def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+
     text = text.lower()
-    text = text.replace("–", "-")
-    text = text.replace("—", "-")
+
+    replacements = {
+        "–": "-",
+        "—": "-",
+        "−": "-",
+        "\u00a0": " ",
+        "\u202f": " ",
+    }
+
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+
     text = re.sub(r"\s+", " ", text)
+
     return text.strip()
 
 
-def safe_float(value: str) -> float:
-    return float(value.replace(",", "."))
+def safe_float(value: str) -> Optional[float]:
+    try:
+        value = value.replace(",", ".")
+        return float(value)
+    except Exception:
+        return None
 
 
-def bbox_from_words(words):
-    if not words:
-        return {
-            "x0": 0,
-            "y0": 0,
-            "x1": 0,
-            "y1": 0,
-            "cx": 0,
-            "cy": 0,
-        }
+def bbox_union(boxes: List[List[float]]) -> List[float]:
+    if not boxes:
+        return [0, 0, 0, 0]
 
-    x0 = min(w["x0"] for w in words)
-    y0 = min(w["y0"] for w in words)
-    x1 = max(w["x1"] for w in words)
-    y1 = max(w["y1"] for w in words)
-
-    return {
-        "x0": x0,
-        "y0": y0,
-        "x1": x1,
-        "y1": y1,
-        "cx": (x0 + x1) / 2,
-        "cy": (y0 + y1) / 2,
-    }
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
 
 
-def bbox_distance(a, b):
-    dx = abs(a["cx"] - b["cx"])
-    dy = abs(a["cy"] - b["cy"])
-    return dx + (dy * 2)
-
-
-def alias_matches(line_text: str, alias: str) -> bool:
-    """
-    Semantic matching with word boundaries where possible.
-    Prevents 'low' from accidentally matching arbitrary substrings.
-    """
-
-    alias = normalize_text(alias)
-
-    pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
-
-    return re.search(pattern, line_text) is not None
-
-
-def contains_goal_context(text: str) -> bool:
-    text = normalize_text(text)
-
-    return any(
-        alias_matches(text, term)
-        for term in GOAL_TERMS
+def bbox_center(bbox: List[float]) -> Tuple[float, float]:
+    return (
+        (bbox[0] + bbox[2]) / 2,
+        (bbox[1] + bbox[3]) / 2
     )
 
 
-def contains_descriptive_context(text: str) -> bool:
-    text = normalize_text(text)
+def bbox_distance(a: List[float], b: List[float]) -> float:
+    ax, ay = bbox_center(a)
+    bx, by = bbox_center(b)
 
-    return any(
-        alias_matches(text, term)
-        for term in DESCRIPTIVE_TERMS
+    return math.sqrt(
+        ((ax - bx) ** 2) +
+        ((ay - by) ** 2)
     )
 
 
-def metric_alias_match(line_text: str, aliases):
-    for alias in aliases:
-        if alias_matches(line_text, alias):
-            return alias
+def vertical_distance(a: List[float], b: List[float]) -> float:
+    _, ay = bbox_center(a)
+    _, by = bbox_center(b)
+    return abs(ay - by)
 
-    return None
+
+def horizontal_distance(a: List[float], b: List[float]) -> float:
+    ax, _ = bbox_center(a)
+    bx, _ = bbox_center(b)
+    return abs(ax - bx)
+
+
+def is_zero(value: Optional[float]) -> bool:
+    return value is not None and abs(value) < 0.00001
 
 
 # ============================================================
@@ -266,1089 +230,1364 @@ def metric_alias_match(line_text: str, aliases):
 
 class UniversalCGMParser:
 
-    def __init__(self, doc):
-        self.doc = doc
-
+    def __init__(self):
         self.pages = []
+        self.words = []
+        self.lines = []
         self.regions = []
         self.candidates = []
         self.anchors = []
         self.associations = []
 
-        self.results = {
-            key: None
-            for key in METRIC_ONTOLOGY.keys()
-        }
-
-        self.derived_metrics = {
-            "TBR": None,
-            "TIR": None,
-            "TAR": None,
-        }
-
-        self.reporting_period = {
-            "start": None,
-            "end": None,
-        }
-
-        self.validation_warnings = []
-        self.review_reasons = []
-
     # --------------------------------------------------------
-    # MAIN PIPELINE
+    # MAIN
     # --------------------------------------------------------
 
-    def parse(self):
+    def parse(self, pdf_bytes: bytes) -> Dict[str, Any]:
 
-        self._ingest_pdf()
+        self._reset()
 
-        self._build_layout()
-
+        self._ingest_pdf(pdf_bytes)
+        self._build_lines()
+        self._build_regions()
         self._extract_candidates()
-
         self._extract_anchors()
 
-        self._associate_labels_and_values()
+        range_values = self._pair_range_components()
+        metric_values = self._pair_standard_metrics()
 
-        self._derive_standardized_metrics()
+        actual_components = {
+            "VERY_LOW": range_values.get("VERY_LOW"),
+            "LOW": range_values.get("LOW"),
+            "IN_RANGE": range_values.get("IN_RANGE"),
+            "HIGH": range_values.get("HIGH"),
+            "VERY_HIGH": range_values.get("VERY_HIGH"),
 
-        self._validate_cluster()
+            "GMI": metric_values.get("GMI"),
+            "CV": metric_values.get("CV"),
+            "ACTIVE_TIME": metric_values.get("ACTIVE_TIME"),
+            "AVG_GLUCOSE": metric_values.get("AVG_GLUCOSE"),
+        }
 
-        self._extract_reporting_period()
+        derived_metrics = self._derive_metrics(actual_components)
 
-        return self._generate_final_report()
+        reporting_period = self._extract_reporting_period()
 
-    # ========================================================
-    # 1. PDF INGESTION
-    # ========================================================
+        validation_warnings = self._validate(
+            actual_components,
+            derived_metrics
+        )
 
-    def _ingest_pdf(self):
+        review_reasons = self._review_reasons(
+            actual_components,
+            derived_metrics,
+            reporting_period
+        )
 
-        for page_number, page in enumerate(self.doc, start=1):
+        status = (
+            "SUCCESS"
+            if not review_reasons
+            else "MANUAL_REVIEW"
+        )
 
-            raw_words = page.get_text("words")
+        return {
+            "status": status,
 
-            words = []
+            "reporting_period": reporting_period,
 
-            for index, word in enumerate(raw_words):
+            "actual_components": actual_components,
 
-                text = word[4].strip()
+            "derived_metrics": derived_metrics,
 
-                if not text:
-                    continue
+            "validation_warnings": validation_warnings,
 
-                words.append({
-                    "index": index,
-                    "text": text,
+            "review_reasons": review_reasons,
 
-                    "x0": float(word[0]),
-                    "y0": float(word[1]),
-                    "x1": float(word[2]),
-                    "y1": float(word[3]),
+            "debug_raw_data": {
+                "pages": len(self.pages),
 
-                    "cx": (word[0] + word[2]) / 2,
-                    "cy": (word[1] + word[3]) / 2,
+                "raw_words": self.words[:500],
 
-                    "block": word[5],
-                    "line": word[6],
-                    "word": word[7],
+                "lines": self.lines,
 
-                    "page": page_number,
-                })
+                "regions": self.regions,
 
-            self.pages.append({
-                "page_num": page_number,
+                "numeric_candidates": self.candidates,
+
+                "anchors": self.anchors,
+
+                "associations": self.associations,
+            }
+        }
+
+    # --------------------------------------------------------
+    # RESET
+    # --------------------------------------------------------
+
+    def _reset(self):
+
+        self.pages = []
+        self.words = []
+        self.lines = []
+        self.regions = []
+        self.candidates = []
+        self.anchors = []
+        self.associations = []
+
+    # --------------------------------------------------------
+    # PDF INGESTION
+    # --------------------------------------------------------
+
+    def _ingest_pdf(self, pdf_bytes: bytes):
+
+        try:
+            document = fitz.open(
+                stream=pdf_bytes,
+                filetype="pdf"
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Cannot open PDF: {str(e)}"
+            )
+
+        for page_number, page in enumerate(document):
+
+            page_words = page.get_text("words")
+
+            page_data = {
+                "page": page_number + 1,
                 "width": page.rect.width,
                 "height": page.rect.height,
-                "raw_words": words,
-            })
+            }
 
-    # ========================================================
-    # 2. DOCUMENT LAYOUT
-    # ========================================================
+            self.pages.append(page_data)
 
-    def _build_layout(self):
+            for index, item in enumerate(page_words):
 
-        region_counter = 0
-
-        for page in self.pages:
-
-            words = sorted(
-                page["raw_words"],
-                key=lambda x: (x["y0"], x["x0"])
-            )
-
-            lines_map = {}
-
-            for word in words:
-
-                key = (
-                    word["block"],
-                    word["line"]
-                )
-
-                lines_map.setdefault(key, []).append(word)
-
-            lines = list(lines_map.values())
-
-            lines.sort(
-                key=lambda line: (
-                    min(w["y0"] for w in line),
-                    min(w["x0"] for w in line)
-                )
-            )
-
-            current_region = []
-
-            for line in lines:
-
-                if not current_region:
-
-                    current_region = [line]
+                if len(item) < 8:
                     continue
 
-                previous_y = min(
-                    w["y0"]
-                    for w in current_region[-1]
+                x0, y0, x1, y1, text, block_no, line_no, word_no = item[:8]
+
+                if not text or not text.strip():
+                    continue
+
+                self.words.append({
+                    "page": page_number + 1,
+                    "index": index,
+                    "x0": float(x0),
+                    "y0": float(y0),
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "bbox": [
+                        float(x0),
+                        float(y0),
+                        float(x1),
+                        float(y1)
+                    ],
+                    "text": text.strip(),
+                    "normalized": normalize_text(text),
+                    "block_no": block_no,
+                    "line_no": line_no,
+                    "word_no": word_no
+                })
+
+        document.close()
+
+    # --------------------------------------------------------
+    # BUILD LINES
+    # --------------------------------------------------------
+
+    def _build_lines(self):
+
+        grouped = {}
+
+        for word in self.words:
+
+            key = (
+                word["page"],
+                word["block_no"],
+                word["line_no"]
+            )
+
+            grouped.setdefault(key, []).append(word)
+
+        lines = []
+
+        line_id = 0
+
+        for key, words in grouped.items():
+
+            words = sorted(
+                words,
+                key=lambda w: w["x0"]
+            )
+
+            text = " ".join(
+                w["text"] for w in words
+            )
+
+            bbox = bbox_union(
+                [w["bbox"] for w in words]
+            )
+
+            lines.append({
+                "line_id": line_id,
+                "page": key[0],
+                "block_no": key[1],
+                "line_no": key[2],
+                "text": text,
+                "normalized": normalize_text(text),
+                "bbox": bbox,
+                "words": words
+            })
+
+            line_id += 1
+
+        self.lines = sorted(
+            lines,
+            key=lambda x: (
+                x["page"],
+                x["bbox"][1],
+                x["bbox"][0]
+            )
+        )
+
+    # --------------------------------------------------------
+    # BUILD SEMANTIC REGIONS
+    # --------------------------------------------------------
+
+    def _build_regions(self):
+
+        self.regions = []
+
+        for page_number in range(
+            1,
+            len(self.pages) + 1
+        ):
+
+            page_lines = [
+                l for l in self.lines
+                if l["page"] == page_number
+            ]
+
+            if not page_lines:
+                continue
+
+            current = []
+            region_id = 0
+
+            for line in page_lines:
+
+                if not current:
+                    current = [line]
+                    continue
+
+                previous = current[-1]
+
+                gap = (
+                    line["bbox"][1]
+                    -
+                    previous["bbox"][3]
                 )
 
-                current_y = min(
-                    w["y0"]
-                    for w in line
+                same_block = (
+                    line["block_no"]
+                    ==
+                    previous["block_no"]
                 )
 
-                # Spatial grouping only.
-                # It does NOT decide semantic meaning.
-                if current_y - previous_y <= 35:
-
-                    current_region.append(line)
-
+                if gap <= 45 or same_block:
+                    current.append(line)
                 else:
-
-                    region_counter += 1
-
-                    self._register_region(
-                        region_counter,
-                        current_region,
-                        page["page_num"]
+                    self._save_region(
+                        page_number,
+                        region_id,
+                        current
                     )
 
-                    current_region = [line]
+                    region_id += 1
+                    current = [line]
 
-            if current_region:
-
-                region_counter += 1
-
-                self._register_region(
-                    region_counter,
-                    current_region,
-                    page["page_num"]
+            if current:
+                self._save_region(
+                    page_number,
+                    region_id,
+                    current
                 )
 
-    def _register_region(
+    def _save_region(
         self,
-        region_id,
-        lines,
-        page_number
+        page_number: int,
+        region_id: int,
+        lines: List[Dict[str, Any]]
     ):
 
-        words = [
-            word
-            for line in lines
-            for word in line
-        ]
-
-        bbox = bbox_from_words(words)
-
         text = " ".join(
-            word["text"]
-            for word in words
+            l["text"] for l in lines
+        )
+
+        normalized = normalize_text(text)
+
+        bbox = bbox_union(
+            [l["bbox"] for l in lines]
+        )
+
+        region_type = self._classify_region(
+            normalized
         )
 
         self.regions.append({
-
-            "region_id": f"reg_{page_number}_{region_id}",
-
+            "region_id": (
+                f"{page_number}-{region_id}"
+            ),
             "page": page_number,
-
+            "text": text,
+            "normalized": normalized,
             "bbox": bbox,
-
-            "text": normalize_text(text),
-
-            "lines": lines,
-
-            "words": words,
+            "type": region_type,
+            "line_ids": [
+                l["line_id"]
+                for l in lines
+            ]
         })
 
-    # ========================================================
-    # 3. NUMERIC CANDIDATES
-    # ========================================================
+    # --------------------------------------------------------
+    # REGION CLASSIFICATION
+    # --------------------------------------------------------
+
+    def _classify_region(
+        self,
+        text: str
+    ) -> str:
+
+        goal_terms = [
+            "goal:",
+            "goals:",
+            "goal ",
+            "target:",
+            "target range",
+            "recommended",
+            "recommendation",
+            "reference",
+            "desired",
+            "clinical target",
+            "glucose ranges goals",
+        ]
+
+        for term in goal_terms:
+            if term in text:
+                return "GOAL"
+
+        actual_terms = [
+            "very low",
+            "very high",
+            "in range",
+            "high",
+            "low",
+        ]
+
+        hits = sum(
+            1 for term in actual_terms
+            if term in text
+        )
+
+        if hits >= 1:
+            return "ACTUAL_RANGE"
+
+        return "NEUTRAL"
+
+    # --------------------------------------------------------
+    # NUMERIC CANDIDATES
+    # --------------------------------------------------------
 
     def _extract_candidates(self):
 
-        number_pattern = re.compile(
-            r"(?P<operator>[<>]?)"
-            r"\s*"
-            r"(?P<number>\d{1,3}(?:[.,]\d{1,2})?)"
-            r"\s*"
-            r"(?P<unit>mmol/L|mg/dL|%)?",
-            re.IGNORECASE
-        )
+        candidates = []
 
-        for region in self.regions:
+        candidate_id = 0
 
-            for line in region["lines"]:
+        for line in self.lines:
 
-                if not line:
-                    continue
+            text = line["text"]
+            normalized = line["normalized"]
 
-                line_words = sorted(
-                    line,
-                    key=lambda w: w["x0"]
+            if self._is_descriptive_line(
+                normalized
+            ):
+                continue
+
+            # Do not parse obvious date lines
+            if re.search(
+                r"\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b",
+                text
+            ):
+                continue
+
+            for match in NUMBER_PATTERN.finditer(text):
+
+                raw_number = match.group(
+                    "number"
                 )
 
-                # Build text with deterministic character offsets.
-                text_parts = []
-                token_spans = []
+                operator = match.group(
+                    "operator"
+                )
+
+                percent = match.group(
+                    "percent"
+                )
+
+                value = safe_float(
+                    raw_number
+                )
+
+                if value is None:
+                    continue
+
+                # Find exact word tokens overlapping
+                # the numeric match.
+                token_boxes = []
+
+                char_start = match.start()
+                char_end = match.end()
+
+                reconstructed = ""
+
+                token_positions = []
 
                 cursor = 0
 
-                for word in line_words:
+                for word in line["words"]:
 
-                    if text_parts:
-                        cursor += 1
+                    word_text = word["text"]
 
-                    start = cursor
-                    end = start + len(word["text"])
+                    start = text.find(
+                        word_text,
+                        cursor
+                    )
 
-                    text_parts.append(word["text"])
+                    if start < 0:
+                        continue
 
-                    token_spans.append({
-                        "start": start,
-                        "end": end,
-                        "word": word,
-                    })
+                    end = start + len(
+                        word_text
+                    )
 
                     cursor = end
 
-                line_text = " ".join(text_parts)
-                normalized_line = normalize_text(line_text)
-
-                descriptive = (
-                    contains_descriptive_context(
-                        normalized_line
+                    token_positions.append(
+                        (
+                            start,
+                            end,
+                            word
+                        )
                     )
+
+                for start, end, word in token_positions:
+
+                    if (
+                        end > char_start
+                        and
+                        start < char_end
+                    ):
+                        token_boxes.append(
+                            word["bbox"]
+                        )
+
+                if not token_boxes:
+                    bbox = line["bbox"]
+                else:
+                    bbox = bbox_union(
+                        token_boxes
+                    )
+
+                context = self._candidate_context(
+                    line,
+                    match
                 )
 
-                goal_context = (
-                    contains_goal_context(
-                        normalized_line
-                    )
+                # Ignore explicit goals.
+                if context == "GOAL":
+                    continue
+
+                # Operators are almost always goals
+                # in this type of report.
+                if operator:
+                    continue
+
+                unit = "%"
+
+                # Check for glucose units nearby.
+                nearby_text = normalize_text(
+                    text
                 )
 
-                for match in number_pattern.finditer(
-                    line_text
+                if (
+                    "mmol/l" in nearby_text
+                    or "mmol" in nearby_text
+                    or "mg/dl" in nearby_text
+                    or "mg dl" in nearby_text
                 ):
+                    if "%" not in match.group(0):
+                        unit = "GLUCOSE"
 
-                    number_text = match.group("number")
+                candidates.append({
+                    "candidate_id": candidate_id,
+                    "value": value,
+                    "unit": unit,
+                    "raw": match.group(0).strip(),
+                    "bbox": bbox,
+                    "page": line["page"],
+                    "line_id": line["line_id"],
+                    "region_id": self._region_for_line(
+                        line["line_id"]
+                    ),
+                    "line_text": text,
+                    "context_type": context,
+                    "has_percent": bool(percent),
+                    "operator": operator,
+                })
 
-                    try:
-                        value = safe_float(number_text)
-                    except ValueError:
-                        continue
+                candidate_id += 1
 
-                    operator = match.group("operator")
-                    unit_raw = match.group("unit")
+        self.candidates = candidates
 
-                    # ------------------------------------------------
-                    # Determine exact numeric token bbox.
-                    # ------------------------------------------------
+    # --------------------------------------------------------
+    # CANDIDATE CONTEXT
+    # --------------------------------------------------------
 
-                    match_start = match.start()
-                    match_end = match.end()
+    def _candidate_context(
+        self,
+        line: Dict[str, Any],
+        match
+    ) -> str:
 
-                    overlapping = []
+        region_id = self._region_for_line(
+            line["line_id"]
+        )
 
-                    for token in token_spans:
+        region = next(
+            (
+                r for r in self.regions
+                if r["region_id"] == region_id
+            ),
+            None
+        )
 
-                        if (
-                            token["end"] > match_start
-                            and token["start"] < match_end
-                        ):
-                            overlapping.append(
-                                token["word"]
-                            )
+        if region:
+            if region["type"] == "GOAL":
+                return "GOAL"
 
-                    if not overlapping:
-                        continue
+            if region["type"] == "ACTUAL_RANGE":
+                return "ACTUAL_RANGE"
 
-                    bbox = bbox_from_words(
-                        overlapping
-                    )
+        return "UNKNOWN"
 
-                    # ------------------------------------------------
-                    # Semantic context.
-                    # ------------------------------------------------
+    # --------------------------------------------------------
+    # DESCRIPTIVE TEXT
+    # --------------------------------------------------------
 
-                    if goal_context or operator:
+    def _is_descriptive_line(
+        self,
+        normalized: str
+    ) -> bool:
 
-                        semantic_role = "GOAL"
+        patterns = [
+            "1% of time in ranges",
+            "about",
+            "defined as percent",
+            "median",
+            "percentile",
+            "printing date",
+            "reporting period",
+        ]
 
-                    elif descriptive:
+        for p in patterns:
+            if p in normalized:
+                return True
 
-                        semantic_role = "UNKNOWN"
+        return False
 
-                    else:
+    # --------------------------------------------------------
+    # REGION FOR LINE
+    # --------------------------------------------------------
 
-                        semantic_role = "ACTUAL"
-
-                    if unit_raw:
-
-                        unit_normalized = unit_raw.lower()
-
-                        if unit_normalized == "%":
-                            unit = "%"
-
-                        elif unit_normalized == "mmol/l":
-                            unit = "mmol/L"
-
-                        elif unit_normalized == "mg/dl":
-                            unit = "mg/dL"
-
-                        else:
-                            unit = "UNKNOWN"
-
-                    else:
-
-                        unit = "DECIMAL"
-
-                    self.candidates.append({
-
-                        "value": value,
-
-                        "raw_text": match.group(0),
-
-                        "unit": unit,
-
-                        "operator": operator,
-
-                        "semantic_role": semantic_role,
-
-                        "page": line_words[0]["page"],
-
-                        "region_id": region["region_id"],
-
-                        "line_id": (
-                            f"{line_words[0]['block']}_"
-                            f"{line_words[0]['line']}"
-                        ),
-
-                        "line_text": line_text,
-
-                        "bbox": bbox,
-
-                    })
-
-    # ========================================================
-    # 4. SEMANTIC ANCHORS
-    # ========================================================
-
-    def _extract_anchors(self):
+    def _region_for_line(
+        self,
+        line_id: int
+    ) -> Optional[str]:
 
         for region in self.regions:
 
-            for line in region["lines"]:
+            if line_id in region["line_ids"]:
+                return region["region_id"]
 
-                if not line:
+        return None
+
+    # --------------------------------------------------------
+    # EXTRACT ANCHORS
+    # --------------------------------------------------------
+
+    def _extract_anchors(self):
+
+        anchors = []
+
+        anchor_id = 0
+
+        for line in self.lines:
+
+            normalized = line["normalized"]
+
+            for metric, definition in METRICS.items():
+
+                aliases = definition["aliases"]
+
+                matched_alias = None
+
+                for alias in aliases:
+
+                    if alias in normalized:
+                        matched_alias = alias
+                        break
+
+                if not matched_alias:
                     continue
 
-                line_words = sorted(
+                # Find bbox of alias approximately.
+                alias_bbox = self._find_alias_bbox(
                     line,
-                    key=lambda w: w["x0"]
+                    matched_alias
                 )
 
-                line_text = normalize_text(
-                    " ".join(
-                        w["text"]
-                        for w in line_words
-                    )
+                anchors.append({
+                    "anchor_id": anchor_id,
+                    "metric": metric,
+                    "alias": matched_alias,
+                    "page": line["page"],
+                    "line_id": line["line_id"],
+                    "region_id": self._region_for_line(
+                        line["line_id"]
+                    ),
+                    "bbox": alias_bbox,
+                    "line_text": line["text"],
+                })
+
+                anchor_id += 1
+
+        self.anchors = anchors
+
+    # --------------------------------------------------------
+    # FIND ALIAS BBOX
+    # --------------------------------------------------------
+
+    def _find_alias_bbox(
+        self,
+        line: Dict[str, Any],
+        alias: str
+    ) -> List[float]:
+
+        alias_normalized = normalize_text(
+            alias
+        )
+
+        matched_words = []
+
+        for word in line["words"]:
+
+            if (
+                normalize_text(word["text"])
+                in alias_normalized
+                or
+                normalize_text(word["text"])
+                in alias_normalized.split()
+            ):
+                matched_words.append(
+                    word["bbox"]
                 )
 
-                line_bbox = bbox_from_words(
-                    line_words
-                )
+        if matched_words:
+            return bbox_union(
+                matched_words
+            )
 
-                for metric, definition in METRIC_ONTOLOGY.items():
-
-                    alias = metric_alias_match(
-                        line_text,
-                        definition["aliases"]
-                    )
-
-                    if not alias:
-                        continue
-
-                    # Avoid duplicate anchor for the same
-                    # metric/line.
-                    duplicate = any(
-                        anchor["metric"] == metric
-                        and anchor["page"] == region["page"]
-                        and anchor["line_id"] == (
-                            f"{line_words[0]['block']}_"
-                            f"{line_words[0]['line']}"
-                        )
-                        for anchor in self.anchors
-                    )
-
-                    if duplicate:
-                        continue
-
-                    self.anchors.append({
-
-                        "metric": metric,
-
-                        "alias": alias,
-
-                        "page": region["page"],
-
-                        "region_id": region["region_id"],
-
-                        "line_id": (
-                            f"{line_words[0]['block']}_"
-                            f"{line_words[0]['line']}"
-                        ),
-
-                        "line_text": line_text,
-
-                        "bbox": line_bbox,
-
-                    })
+        return line["bbox"]
 
     # ========================================================
-    # 5. LABEL → VALUE ASSOCIATION
+    # RANGE PAIRING
     # ========================================================
 
-    def _associate_labels_and_values(self):
+    def _pair_range_components(self):
 
-        for anchor in self.anchors:
+        range_metrics = [
+            "VERY_LOW",
+            "LOW",
+            "IN_RANGE",
+            "HIGH",
+            "VERY_HIGH"
+        ]
 
-            metric = anchor["metric"]
+        anchors = [
+            a for a in self.anchors
+            if a["metric"] in range_metrics
+        ]
 
-            definition = METRIC_ONTOLOGY[metric]
+        candidates = [
+            c for c in self.candidates
+            if c["unit"] == "%"
+            and c["context_type"] == "ACTUAL_RANGE"
+        ]
 
-            possible = []
+        result = {
+            metric: None
+            for metric in range_metrics
+        }
 
-            for candidate in self.candidates:
+        if not anchors or not candidates:
+            return result
 
-                # Must be same page.
+        # ----------------------------------------------------
+        # STEP 1:
+        # Strong same-line pairing
+        # ----------------------------------------------------
+
+        used_candidates = set()
+        used_metrics = set()
+
+        for anchor in anchors:
+
+            best = None
+            best_score = float("inf")
+
+            for candidate in candidates:
+
+                if candidate["candidate_id"] in used_candidates:
+                    continue
+
                 if candidate["page"] != anchor["page"]:
                     continue
 
-                # Never associate goal data as patient actual.
-                if candidate["semantic_role"] != "ACTUAL":
+                if candidate["line_id"] == anchor["line_id"]:
 
-                    self._record_rejection(
-                        anchor,
-                        candidate,
-                        "NON_ACTUAL_CONTEXT"
-                    )
-
-                    continue
-
-                # ------------------------------------------------
-                # Unit compatibility
-                # ------------------------------------------------
-
-                if metric != "AVG_GLUCOSE":
-
-                    if candidate["unit"] != definition["expected_unit"]:
-
-                        self._record_rejection(
-                            anchor,
-                            candidate,
-                            "WRONG_UNIT"
-                        )
-
-                        continue
-
-                else:
-
-                    if candidate["unit"] not in (
-                        "mmol/L",
-                        "mg/dL",
-                        "DECIMAL",
-                    ):
-
-                        self._record_rejection(
-                            anchor,
-                            candidate,
-                            "WRONG_GLUCOSE_UNIT"
-                        )
-
-                        continue
-
-                # ------------------------------------------------
-                # Value range
-                # ------------------------------------------------
-
-                minimum, maximum = definition["valid_range"]
-
-                if not (
-                    minimum
-                    <= candidate["value"]
-                    <= maximum
-                ):
-
-                    self._record_rejection(
-                        anchor,
-                        candidate,
-                        "OUT_OF_RANGE"
-                    )
-
-                    continue
-
-                # ------------------------------------------------
-                # Spatial relationship
-                # ------------------------------------------------
-
-                y_distance = abs(
-                    candidate["bbox"]["cy"]
-                    - anchor["bbox"]["cy"]
-                )
-
-                x_distance = abs(
-                    candidate["bbox"]["cx"]
-                    - anchor["bbox"]["cx"]
-                )
-
-                if y_distance > 80:
-                    continue
-
-                score = 0.0
-                reasons = []
-
-                # Same region.
-                if (
-                    candidate["region_id"]
-                    == anchor["region_id"]
-                ):
-                    score += 0.25
-                    reasons.append(
-                        "SAME_REGION"
-                    )
-
-                # Same line.
-                if (
-                    candidate["line_id"]
-                    == anchor["line_id"]
-                ):
-                    score += 0.45
-                    reasons.append(
-                        "SAME_LINE"
-                    )
-
-                elif y_distance <= 20:
-
-                    score += 0.25
-                    reasons.append(
-                        "NEAR_VERTICAL"
-                    )
-
-                elif y_distance <= 45:
-
-                    score += 0.15
-                    reasons.append(
-                        "MULTI_LINE"
-                    )
-
-                # Horizontal proximity.
-                if x_distance <= 100:
-
-                    score += 0.20
-                    reasons.append(
-                        "HORIZONTAL_PROXIMITY"
-                    )
-
-                elif x_distance <= 250:
-
-                    score += 0.08
-                    reasons.append(
-                        "MODERATE_HORIZONTAL_PROXIMITY"
-                    )
-
-                # Small vertical distance bonus.
-                if y_distance <= 10:
-
-                    score += 0.10
-                    reasons.append(
-                        "VERY_CLOSE"
-                    )
-
-                possible.append({
-
-                    "candidate": candidate,
-
-                    "score": round(
-                        min(score, 1.0),
-                        3
-                    ),
-
-                    "distance": bbox_distance(
+                    score = horizontal_distance(
                         anchor["bbox"],
                         candidate["bbox"]
-                    ),
-
-                    "reason": " | ".join(reasons),
-
-                })
-
-            if not possible:
-                continue
-
-            # Highest semantic/spatial score first.
-            possible.sort(
-                key=lambda x: (
-                    -x["score"],
-                    x["distance"]
-                )
-            )
-
-            best = possible[0]
-
-            # ----------------------------------------------------
-            # Ambiguity protection.
-            # ----------------------------------------------------
-
-            if len(possible) > 1:
-
-                second = possible[1]
-
-                score_difference = (
-                    best["score"]
-                    - second["score"]
-                )
-
-                if score_difference < 0.10:
-
-                    self.results[metric] = {
-                        "value": None,
-                        "confidence": 0.0,
-                        "status": "MANUAL_REVIEW",
-                        "reason": "AMBIGUOUS_VALUE",
-                    }
-
-                    self.review_reasons.append(
-                        f"{metric}: ambiguous candidates"
                     )
 
-                    continue
+                    # Very strong preference for same line.
+                    score *= 0.1
 
-            # ----------------------------------------------------
-            # Confidence threshold.
-            # ----------------------------------------------------
+                    if score < best_score:
+                        best_score = score
+                        best = candidate
 
-            if best["score"] < 0.30:
+            if best is not None:
 
-                self.results[metric] = {
-                    "value": None,
-                    "confidence": best["score"],
-                    "status": "MANUAL_REVIEW",
-                    "reason": "LOW_CONFIDENCE",
-                }
+                result[
+                    anchor["metric"]
+                ] = best["value"]
 
-                self.review_reasons.append(
-                    f"{metric}: low confidence"
+                used_candidates.add(
+                    best["candidate_id"]
                 )
 
+                used_metrics.add(
+                    anchor["metric"]
+                )
+
+                self.associations.append({
+                    "type": "RANGE",
+                    "metric": anchor["metric"],
+                    "candidate_id": best["candidate_id"],
+                    "value": best["value"],
+                    "method": "same_line"
+                })
+
+        # ----------------------------------------------------
+        # STEP 2:
+        # Pair remaining items using geometry.
+        # ----------------------------------------------------
+
+        remaining_anchors = [
+            a for a in anchors
+            if a["metric"] not in used_metrics
+        ]
+
+        remaining_candidates = [
+            c for c in candidates
+            if c["candidate_id"] not in used_candidates
+        ]
+
+        pairs = []
+
+        for anchor in remaining_anchors:
+
+            for candidate in remaining_candidates:
+
+                if candidate["page"] != anchor["page"]:
+                    continue
+
+                dy = vertical_distance(
+                    anchor["bbox"],
+                    candidate["bbox"]
+                )
+
+                dx = horizontal_distance(
+                    anchor["bbox"],
+                    candidate["bbox"]
+                )
+
+                if dy > 100:
+                    continue
+
+                score = (
+                    dy
+                    +
+                    (dx * 0.25)
+                )
+
+                # Same region gets a bonus.
+                if (
+                    anchor["region_id"]
+                    ==
+                    candidate["region_id"]
+                ):
+                    score -= 25
+
+                pairs.append({
+                    "metric": anchor["metric"],
+                    "candidate_id": candidate["candidate_id"],
+                    "value": candidate["value"],
+                    "score": score,
+                    "anchor": anchor,
+                    "candidate": candidate
+                })
+
+        # ----------------------------------------------------
+        # Greedy 1:1 assignment.
+        # ----------------------------------------------------
+
+        pairs.sort(
+            key=lambda x: x["score"]
+        )
+
+        for pair in pairs:
+
+            metric = pair["metric"]
+            candidate_id = pair["candidate_id"]
+
+            if metric in used_metrics:
                 continue
 
-            candidate = best["candidate"]
+            if candidate_id in used_candidates:
+                continue
 
-            result = {
+            # Prevent absurdly distant matches.
+            if pair["score"] > 120:
+                continue
 
-                "value": candidate["value"],
+            result[metric] = pair["value"]
 
-                "unit": candidate["unit"],
-
-                "confidence": best["score"],
-
-                "status": "OK",
-
-                "page": candidate["page"],
-
-                "source": {
-
-                    "alias": anchor["alias"],
-
-                    "label_text": anchor["line_text"],
-
-                    "value_text": candidate["raw_text"],
-
-                    "label_bbox": anchor["bbox"],
-
-                    "value_bbox": candidate["bbox"],
-
-                    "region_id": candidate[
-                        "region_id"
-                    ],
-
-                },
-
-            }
-
-            current = self.results.get(metric)
-
-            if (
-                current is None
-                or current.get("confidence", 0)
-                < result["confidence"]
-            ):
-
-                self.results[metric] = result
+            used_metrics.add(metric)
+            used_candidates.add(candidate_id)
 
             self.associations.append({
-
+                "type": "RANGE",
                 "metric": metric,
-
-                "value": candidate["value"],
-
-                "unit": candidate["unit"],
-
-                "score": best["score"],
-
-                "reason": best["reason"],
-
-                "label_text": anchor["line_text"],
-
-                "value_text": candidate["raw_text"],
-
-                "rejected": False,
-
+                "candidate_id": candidate_id,
+                "value": pair["value"],
+                "method": "geometric_1_to_1",
+                "score": round(
+                    pair["score"],
+                    2
+                )
             })
 
-    def _record_rejection(
+        return result
+
+    # ========================================================
+    # STANDARD METRICS
+    # ========================================================
+
+    def _pair_standard_metrics(self):
+
+        target_metrics = [
+            "GMI",
+            "CV",
+            "ACTIVE_TIME",
+            "AVG_GLUCOSE"
+        ]
+
+        result = {
+            metric: None
+            for metric in target_metrics
+        }
+
+        for metric in target_metrics:
+
+            anchors = [
+                a for a in self.anchors
+                if a["metric"] == metric
+            ]
+
+            if not anchors:
+                continue
+
+            best_pair = None
+            best_score = float("inf")
+
+            for anchor in anchors:
+
+                for candidate in self.candidates:
+
+                    if candidate["page"] != anchor["page"]:
+                        continue
+
+                    if candidate["context_type"] == "GOAL":
+                        continue
+
+                    if metric == "AVG_GLUCOSE":
+
+                        if candidate["unit"] != "GLUCOSE":
+                            continue
+
+                    else:
+
+                        if candidate["unit"] != "%":
+                            continue
+
+                    dy = vertical_distance(
+                        anchor["bbox"],
+                        candidate["bbox"]
+                    )
+
+                    dx = horizontal_distance(
+                        anchor["bbox"],
+                        candidate["bbox"]
+                    )
+
+                    if dy > 150:
+                        continue
+
+                    score = (
+                        dy
+                        +
+                        dx * 0.20
+                    )
+
+                    if (
+                        anchor["region_id"]
+                        ==
+                        candidate["region_id"]
+                    ):
+                        score -= 20
+
+                    # Same line is extremely strong.
+                    if (
+                        anchor["line_id"]
+                        ==
+                        candidate["line_id"]
+                    ):
+                        score -= 50
+
+                    if score < best_score:
+                        best_score = score
+                        best_pair = (
+                            anchor,
+                            candidate
+                        )
+
+            if best_pair:
+
+                anchor, candidate = best_pair
+
+                result[metric] = candidate["value"]
+
+                self.associations.append({
+                    "type": "STANDARD",
+                    "metric": metric,
+                    "candidate_id": candidate[
+                        "candidate_id"
+                    ],
+                    "value": candidate["value"],
+                    "score": round(
+                        best_score,
+                        2
+                    )
+                })
+
+        return result
+
+    # ========================================================
+    # DERIVED METRICS
+    # ========================================================
+
+    def _derive_metrics(
         self,
-        anchor,
-        candidate,
-        reason
+        actual: Dict[str, Any]
     ):
 
-        self.associations.append({
-
-            "metric": anchor["metric"],
-
-            "value": candidate["value"],
-
-            "unit": candidate["unit"],
-
-            "score": 0,
-
-            "reason": reason,
-
-            "label_text": anchor["line_text"],
-
-            "value_text": candidate["raw_text"],
-
-            "rejected": True,
-
-        })
-
-    # ========================================================
-    # 6. STANDARDIZED METRICS
-    # ========================================================
-
-    def _derive_standardized_metrics(self):
-
-        very_low = self._value(
+        very_low = actual.get(
             "VERY_LOW"
         )
 
-        low = self._value(
+        low = actual.get(
             "LOW"
         )
 
-        in_range = self._value(
+        in_range = actual.get(
             "IN_RANGE"
         )
 
-        high = self._value(
+        high = actual.get(
             "HIGH"
         )
 
-        very_high = self._value(
+        very_high = actual.get(
             "VERY_HIGH"
         )
 
-        # TBR = Very Low + Low
+        tbr = None
+        tir = None
+        tar = None
+
         if (
             very_low is not None
-            and low is not None
+            and
+            low is not None
         ):
-
-            self.derived_metrics["TBR"] = (
-                very_low + low
+            tbr = round(
+                very_low + low,
+                2
             )
 
-        # TIR = In Range
         if in_range is not None:
-
-            self.derived_metrics["TIR"] = (
-                in_range
+            tir = round(
+                in_range,
+                2
             )
 
-        # TAR = High + Very High
         if (
             high is not None
-            and very_high is not None
+            and
+            very_high is not None
         ):
-
-            self.derived_metrics["TAR"] = (
-                high + very_high
+            tar = round(
+                high + very_high,
+                2
             )
 
-    def _value(self, metric):
-
-        result = self.results.get(metric)
-
-        if not result:
-            return None
-
-        if result.get("status") != "OK":
-            return None
-
-        return result.get("value")
+        return {
+            "TBR": tbr,
+            "TIR": tir,
+            "TAR": tar
+        }
 
     # ========================================================
-    # 7. RANGE VALIDATION
+    # VALIDATION
     # ========================================================
 
-    def _validate_cluster(self):
+    def _validate(
+        self,
+        actual: Dict[str, Any],
+        derived: Dict[str, Any]
+    ) -> List[str]:
 
-        values = [
-            self._value("VERY_LOW"),
-            self._value("LOW"),
-            self._value("IN_RANGE"),
-            self._value("HIGH"),
-            self._value("VERY_HIGH"),
+        warnings = []
+
+        # -----------------------------------------------
+        # Range components
+        # -----------------------------------------------
+
+        range_values = [
+            actual.get("VERY_LOW"),
+            actual.get("LOW"),
+            actual.get("IN_RANGE"),
+            actual.get("HIGH"),
+            actual.get("VERY_HIGH")
         ]
 
-        if not all(
+        if all(
             value is not None
-            for value in values
+            for value in range_values
         ):
-            return
 
-        total = sum(values)
+            total = sum(range_values)
 
-        if abs(total - 100) <= 2:
+            if abs(total - 100) > 2:
+                warnings.append(
+                    f"Range components sum to "
+                    f"{total}%, expected approximately 100%"
+                )
 
-            self.validation_warnings.append(
-                f"RANGE_BREAKDOWN_VALID: {total}%"
-            )
+            for value in range_values:
 
-            for metric in [
-                "VERY_LOW",
-                "LOW",
-                "IN_RANGE",
-                "HIGH",
-                "VERY_HIGH",
-            ]:
-
-                if self.results[metric]:
-
-                    self.results[metric][
-                        "confidence"
-                    ] = min(
-                        1.0,
-                        self.results[metric][
-                            "confidence"
-                        ] + 0.05
+                if value < 0 or value > 100:
+                    warnings.append(
+                        "Range component outside 0-100%"
                     )
 
-        else:
+        # -----------------------------------------------
+        # GMI
+        # -----------------------------------------------
 
-            self.validation_warnings.append(
-                f"RANGE_BREAKDOWN_WARNING: {total}%"
-            )
+        gmi = actual.get("GMI")
 
-            self.review_reasons.append(
-                f"Range breakdown sum={total}%"
-            )
+        if gmi is not None:
+
+            if gmi <= 0 or gmi > 20:
+                warnings.append(
+                    "GMI value outside plausible range"
+                )
+
+        # -----------------------------------------------
+        # CV
+        # -----------------------------------------------
+
+        cv = actual.get("CV")
+
+        if cv is not None:
+
+            if cv < 0 or cv > 200:
+                warnings.append(
+                    "CV value outside plausible range"
+                )
+
+        # -----------------------------------------------
+        # Active time
+        # -----------------------------------------------
+
+        active = actual.get(
+            "ACTIVE_TIME"
+        )
+
+        if active is not None:
+
+            if active < 0 or active > 100:
+                warnings.append(
+                    "Active time outside 0-100%"
+                )
+
+        return warnings
 
     # ========================================================
-    # 8. REPORTING PERIOD
+    # REVIEW REASONS
+    # ========================================================
+
+    def _review_reasons(
+        self,
+        actual: Dict[str, Any],
+        derived: Dict[str, Any],
+        reporting_period: Dict[str, Any]
+    ) -> List[str]:
+
+        reasons = []
+
+        range_metrics = [
+            "VERY_LOW",
+            "LOW",
+            "IN_RANGE",
+            "HIGH",
+            "VERY_HIGH"
+        ]
+
+        missing_range = [
+            metric
+            for metric in range_metrics
+            if actual.get(metric) is None
+        ]
+
+        if missing_range:
+
+            reasons.append(
+                "Missing actual range components: "
+                +
+                ", ".join(missing_range)
+            )
+
+        standard_metrics = [
+            "GMI",
+            "CV",
+            "ACTIVE_TIME",
+            "AVG_GLUCOSE"
+        ]
+
+        for metric in standard_metrics:
+
+            if actual.get(metric) is None:
+
+                reasons.append(
+                    f"Missing {metric}"
+                )
+
+        if derived["TBR"] is None:
+            reasons.append(
+                "TBR cannot be derived"
+            )
+
+        if derived["TIR"] is None:
+            reasons.append(
+                "TIR cannot be derived"
+            )
+
+        if derived["TAR"] is None:
+            reasons.append(
+                "TAR cannot be derived"
+            )
+
+        if (
+            reporting_period.get("start")
+            is None
+            or
+            reporting_period.get("end")
+            is None
+        ):
+            reasons.append(
+                "Reporting period not detected"
+            )
+
+        return reasons
+
+    # ========================================================
+    # REPORTING PERIOD
     # ========================================================
 
     def _extract_reporting_period(self):
 
-        date_pattern = re.compile(
-            r"\b"
-            r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})"
-            r"\s*[-–—]\s*"
-            r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})"
-            r"\b"
-        )
+        dates = []
 
-        for page in self.pages:
+        # Use raw word order.
+        for page_number in range(
+            1,
+            len(self.pages) + 1
+        ):
 
-            text = " ".join(
-                word["text"]
-                for word in page["raw_words"]
+            page_words = [
+                w for w in self.words
+                if w["page"] == page_number
+            ]
+
+            page_words = sorted(
+                page_words,
+                key=lambda w: (
+                    w["y0"],
+                    w["x0"]
+                )
             )
 
-            match = date_pattern.search(text)
+            page_text = " ".join(
+                w["text"]
+                for w in page_words
+            )
 
-            if not match:
-                continue
+            matches = DATE_PATTERN.findall(
+                page_text
+            )
 
-            first = match.group(1)
-            second = match.group(2)
+            for date_text in matches:
+
+                if date_text not in dates:
+                    dates.append(
+                        date_text
+                    )
+
+        if len(dates) < 2:
+
+            return {
+                "start": None,
+                "end": None
+            }
+
+        parsed = []
+
+        for date_text in dates:
 
             try:
 
-                d1 = datetime.strptime(
-                    first,
+                dt = datetime.strptime(
+                    date_text,
                     "%d %b %Y"
                 )
 
-                d2 = datetime.strptime(
-                    second,
-                    "%d %b %Y"
+                parsed.append(
+                    (
+                        dt,
+                        date_text
+                    )
                 )
 
-                if d1 <= d2:
+            except Exception:
+                pass
 
-                    start = first
-                    end = second
+        if len(parsed) >= 2:
 
-                else:
+            parsed.sort(
+                key=lambda x: x[0]
+            )
 
-                    start = second
-                    end = first
-
-                self.reporting_period = {
-                    "start": start,
-                    "end": end,
-                }
-
-            except ValueError:
-
-                self.reporting_period = {
-                    "start": first,
-                    "end": second,
-                }
-
-            return
-
-    # ========================================================
-    # 9. FINAL STANDARDIZED REPORT
-    # ========================================================
-
-    def _generate_final_report(self):
-
-        actual_components = {}
-
-        for metric in METRIC_ONTOLOGY:
-
-            result = self.results.get(metric)
-
-            if (
-                result
-                and result.get("status") == "OK"
-            ):
-
-                actual_components[metric] = (
-                    result["value"]
-                )
-
-            else:
-
-                actual_components[metric] = None
-
-        overall_status = (
-            "MANUAL_REVIEW"
-            if self.review_reasons
-            else "SUCCESS"
-        )
+            return {
+                "start": parsed[0][1],
+                "end": parsed[-1][1]
+            }
 
         return {
+            "start": dates[0],
+            "end": dates[1]
+        }
 
-            "status": overall_status,
 
-            "reporting_period":
-                self.reporting_period,
+# ============================================================
+# SUPABASE
+# ============================================================
 
-            "actual_components":
-                actual_components,
+def supabase_headers():
 
-            "derived_metrics":
-                self.derived_metrics,
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": (
+            f"Bearer {SUPABASE_KEY}"
+        ),
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
 
-            "review_reasons":
-                self.review_reasons,
 
-            "validation_warnings":
-                self.validation_warnings,
+def supabase_insert(
+    table: str,
+    data: Dict[str, Any]
+):
 
-            "debug_raw_data": {
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
 
-                "pages": len(self.pages),
+    url = (
+        f"{SUPABASE_URL}"
+        f"/rest/v1/{table}"
+    )
 
-                "raw_words": [
-                    word["text"]
-                    for page in self.pages
-                    for word in page["raw_words"]
-                ][:500],
+    try:
 
-                "regions": [
+        response = requests.post(
+            url,
+            headers=supabase_headers(),
+            json=data,
+            timeout=15
+        )
 
-                    {
-                        "region_id":
-                            region["region_id"],
+        if response.status_code >= 400:
+            return {
+                "status": "ERROR",
+                "http_status": response.status_code,
+                "response": response.text
+            }
 
-                        "page":
-                            region["page"],
+        return response.json()
 
-                        "bbox":
-                            region["bbox"],
+    except Exception as e:
 
-                        "text":
-                            region["text"][:300],
-
-                    }
-
-                    for region in self.regions
-                ],
-
-                "extracted_candidates":
-                    self.candidates,
-
-                "detected_anchors":
-                    self.anchors,
-
-                "associations":
-                    self.associations,
-
-                "metrics": {
-
-                    metric: self.results[
-                        metric
-                    ]
-
-                    for metric
-                    in METRIC_ONTOLOGY
-
-                },
-
-                "derived_metrics":
-                    self.derived_metrics,
-
-                "validation_warnings":
-                    self.validation_warnings,
-
-                "review_reasons":
-                    self.review_reasons,
-            },
+        return {
+            "status": "ERROR",
+            "error": str(e)
         }
 
 
@@ -1356,246 +1595,137 @@ class UniversalCGMParser:
 # DEBUG ENDPOINT
 # ============================================================
 
-@app.post("/debug-parser-test")
+@app.post(
+    "/debug-parser-test"
+)
 async def debug_parser_test(
     file: UploadFile = File(...)
 ):
 
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="File name missing"
+        )
+
     if not file.filename.lower().endswith(
         ".pdf"
     ):
-
         raise HTTPException(
             status_code=400,
-            detail="File mora biti PDF."
+            detail="Only PDF files are supported"
         )
 
-    content = await file.read()
+    pdf_bytes = await file.read()
 
-    if not content:
-
+    if len(pdf_bytes) > MAX_FILE_SIZE:
         raise HTTPException(
-            status_code=400,
-            detail="PDF je prazan."
+            status_code=413,
+            detail=(
+                f"File too large. "
+                f"Maximum is {MAX_FILE_SIZE_MB} MB."
+            )
         )
 
     try:
 
-        doc = fitz.open(
-            stream=content,
-            filetype="pdf"
+        parser = UniversalCGMParser()
+
+        result = parser.parse(
+            pdf_bytes
         )
 
-    except Exception as exc:
+        return result
 
-        raise HTTPException(
-            status_code=400,
-            detail=f"PDF nije moguće otvoriti: {exc}"
-        )
-
-    try:
-
-        parser = UniversalCGMParser(doc)
-
-        report = parser.parse()
-
-        return JSONResponse(
-            content=report
-        )
-
-    except Exception as exc:
+    except Exception as e:
 
         raise HTTPException(
             status_code=500,
-            detail=f"Parser error: {exc}"
+            detail={
+                "status": "ERROR",
+                "error": str(e)
+            }
         )
 
-    finally:
-
-        doc.close()
-
 
 # ============================================================
-# DATABASE UPLOAD ENDPOINT
+# UPLOAD ENDPOINT
 # ============================================================
 
-@app.post("/upload")
-async def upload_report(
+@app.post(
+    "/upload"
+)
+async def upload_pdf(
     file: UploadFile = File(...)
 ):
 
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="File name missing"
+        )
+
     if not file.filename.lower().endswith(
         ".pdf"
     ):
-
         raise HTTPException(
             status_code=400,
-            detail="File mora biti PDF."
+            detail="Only PDF files are supported"
         )
 
-    content = await file.read()
+    pdf_bytes = await file.read()
+
+    if len(pdf_bytes) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File too large. "
+                f"Maximum is {MAX_FILE_SIZE_MB} MB."
+            )
+        )
+
+    parser = UniversalCGMParser()
 
     try:
 
-        doc = fitz.open(
-            stream=content,
-            filetype="pdf"
+        report = parser.parse(
+            pdf_bytes
         )
 
-        parser = UniversalCGMParser(doc)
-
-        extracted = parser.parse()
-
-        doc.close()
-
-    except Exception as exc:
+    except Exception as e:
 
         raise HTTPException(
             status_code=500,
-            detail=f"Parsing failed: {exc}"
+            detail=str(e)
         )
 
     # --------------------------------------------------------
     # IMPORTANT:
-    #
-    # Patient identification is intentionally NOT derived
-    # from manufacturer name.
-    #
-    # For this MVP a temporary ID is used.
-    # Production version should obtain this from authenticated
-    # patient/session mapping.
+    # The original PDF is NOT stored here.
+    # Only the parsed standardized data should persist.
     # --------------------------------------------------------
 
-    patient_id = "P-000127"
+    patient_id = None
 
-    actuals = extracted[
-        "actual_components"
-    ]
-
-    derived = extracted[
-        "derived_metrics"
-    ]
-
-    parsed_data = {
-
-        "patient_id":
-            patient_id,
-
-        "device_name":
-            "Universal CGM Report",
-
-        "manufacturer":
-            None,
-
-        "tir":
-            derived.get("TIR"),
-
-        "tbr":
-            derived.get("TBR"),
-
-        "tar":
-            derived.get("TAR"),
-
-        "gmi_percent":
-            actuals.get("GMI"),
-
-        "cv":
-            actuals.get("CV"),
-
-        "active_time":
-            (
-                str(
-                    actuals["ACTIVE_TIME"]
-                ) + "%"
-                if actuals.get(
-                    "ACTIVE_TIME"
-                ) is not None
-                else None
-            ),
-    }
-
-    # Do not write uncertain reports automatically.
-    if extracted["status"] != "SUCCESS":
-
-        return {
-
-            "status":
-                "manual_review",
-
-            "data":
-                parsed_data,
-
-            "engine_report":
-                extracted,
-
-        }
-
-    try:
-
-        response = requests.post(
-
-            f"{SUPABASE_URL}"
-            "/rest/v1/cgm_reports",
-
-            headers=SUPABASE_HEADERS,
-
-            json=parsed_data,
-
-            timeout=20,
-
-        )
-
-    except requests.RequestException as exc:
-
-        raise HTTPException(
-            status_code=502,
-            detail=f"Supabase connection failed: {exc}"
-        )
-
-    if response.status_code not in (
-        200,
-        201,
-    ):
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail=(
-                "Supabase odbila zahtev: "
-                + response.text
-            ),
-
-        )
+    # For MVP:
+    # patient_id should later come from authenticated
+    # physician/patient workflow rather than being hardcoded.
 
     return {
-
-        "status":
-            "success",
-
-        "data":
-            parsed_data,
-
-        "engine_report":
-            extracted,
-
+        "status": report["status"],
+        "filename": file.filename,
+        "patient_id": patient_id,
+        "report": report
     }
 
 
 # ============================================================
-# SIMPLE TEST FRONTEND
+# FRONTEND
 # ============================================================
 
-@app.get(
-    "/",
-    response_class=HTMLResponse
-)
-def patient_form():
-
-    return """
+HTML = """
 <!DOCTYPE html>
-
-<html lang="sr">
+<html lang="en">
 
 <head>
 
@@ -1604,66 +1734,91 @@ def patient_form():
 <meta name="viewport"
       content="width=device-width, initial-scale=1.0">
 
-<title>Universal CGM Parser</title>
+<title>Universal CGM AGP Parser</title>
 
 <style>
 
 body {
-    margin: 0;
-    padding: 25px;
-    background: #0f172a;
-    color: #f8fafc;
     font-family: Arial, sans-serif;
+    background: #f5f7fa;
+    margin: 0;
+    padding: 30px;
 }
 
 .container {
-    width: 100%;
-    max-width: 1000px;
+    max-width: 1100px;
     margin: auto;
 }
 
 .card {
-    background: #1e293b;
-    padding: 20px;
+    background: white;
     border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow:
+        0 2px 10px rgba(0,0,0,0.08);
+}
+
+h1 {
+    margin-top: 0;
 }
 
 button {
-    background: #0d9488;
-    color: white;
+    padding: 12px 20px;
     border: none;
-    padding: 10px 18px;
-    border-radius: 7px;
+    border-radius: 8px;
     cursor: pointer;
-    font-weight: bold;
+    background: #222;
+    color: white;
+    font-size: 15px;
 }
 
-button.secondary {
-    background: #334155;
+input[type=file] {
+    margin: 15px 0;
 }
 
 pre {
-    margin-top: 20px;
-    background: #030712;
-    padding: 15px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #111;
+    color: #eee;
+    padding: 20px;
     border-radius: 8px;
-    overflow: auto;
-    max-height: 650px;
+    overflow-x: auto;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns:
+        repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.metric {
+    background: #f0f2f5;
+    padding: 16px;
+    border-radius: 8px;
+}
+
+.metric strong {
+    display: block;
     font-size: 12px;
+    color: #666;
+    margin-bottom: 5px;
 }
 
-.tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 15px;
+.metric span {
+    font-size: 24px;
+    font-weight: bold;
 }
 
-input {
-    margin-bottom: 15px;
+.success {
+    color: green;
+    font-weight: bold;
 }
 
-.status {
-    margin-top: 12px;
+.review {
+    color: #b36b00;
     font-weight: bold;
 }
 
@@ -1675,178 +1830,324 @@ input {
 
 <div class="container">
 
-<h2>
-Universal CGM / AGP Parser
-</h2>
-
 <div class="card">
 
-<form id="form">
+<h1>Universal CGM / AGP Parser</h1>
+
+<p>
+Upload any supported CGM AGP PDF.
+The parser attempts to identify the
+standardized glucose metrics without relying
+on a manufacturer-specific parser.
+</p>
 
 <input
-    type="file"
     id="file"
+    type="file"
     accept=".pdf"
-    required
 >
 
 <br>
 
-<button type="submit">
-Pokreni analizu
-</button>
-
-</form>
-
-<div class="tabs">
-
-<button
-    class="secondary"
-    onclick="showResult()"
->
-Result
-</button>
-
-<button
-    class="secondary"
-    onclick="showDebug()"
->
-Debug
+<button onclick="parseFile()">
+    Parse PDF
 </button>
 
 </div>
 
-<div id="status"
-     class="status">
+
+<div id="result"></div>
+
+
+<div class="card">
+
+<h2>Debug JSON</h2>
+
+<pre id="json">
+No result yet.
+</pre>
+
 </div>
 
-<pre id="output"></pre>
-
 </div>
 
-</div>
 
 <script>
 
-let lastData = null;
+async function parseFile() {
 
-function showResult() {
+    const fileInput =
+        document.getElementById("file");
 
-    if (!lastData) return;
+    if (!fileInput.files.length) {
 
-    const result = {
+        alert("Choose a PDF first.");
 
-        status:
-            lastData.status,
+        return;
+    }
 
-        reporting_period:
-            lastData.reporting_period,
+    const file =
+        fileInput.files[0];
 
-        actual_components:
-            lastData.actual_components,
+    const formData =
+        new FormData();
 
-        derived_metrics:
-            lastData.derived_metrics,
-
-        review_reasons:
-            lastData.review_reasons,
-
-        validation_warnings:
-            lastData.validation_warnings
-
-    };
+    formData.append(
+        "file",
+        file
+    );
 
     document.getElementById(
-        "output"
-    ).textContent =
-        JSON.stringify(
-            result,
-            null,
-            2
-        );
-}
+        "result"
+    ).innerHTML =
+        "<div class='card'>Parsing...</div>";
 
-function showDebug() {
+    try {
 
-    if (!lastData) return;
+        const response =
+            await fetch(
+                "/debug-parser-test",
+                {
+                    method: "POST",
+                    body: formData
+                }
+            );
 
-    document.getElementById(
-        "output"
-    ).textContent =
-        JSON.stringify(
-            lastData.debug_raw_data,
-            null,
-            2
-        );
-}
+        const data =
+            await response.json();
 
-document.getElementById(
-    "form"
-).addEventListener(
-    "submit",
-    async function(event) {
-
-        event.preventDefault();
-
-        const file =
-            document.getElementById(
-                "file"
-            ).files[0];
-
-        if (!file) return;
+        renderResult(data);
 
         document.getElementById(
-            "status"
+            "json"
         ).textContent =
-            "Analiza u toku...";
+            JSON.stringify(
+                data,
+                null,
+                2
+            );
+
+    } catch (error) {
 
         document.getElementById(
-            "output"
-        ).textContent =
-            "";
-
-        const formData =
-            new FormData();
-
-        formData.append(
-            "file",
-            file
-        );
-
-        try {
-
-            const response =
-                await fetch(
-                    "/debug-parser-test",
-                    {
-                        method: "POST",
-                        body: formData
-                    }
-                );
-
-            const data =
-                await response.json();
-
-            lastData = data;
-
-            document.getElementById(
-                "status"
-            ).textContent =
-                data.status || "DONE";
-
-            showResult();
-
-        } catch (error) {
-
-            document.getElementById(
-                "status"
-            ).textContent =
-                "Greška: " + error;
-
-        }
+            "result"
+        ).innerHTML =
+            "<div class='card'>" +
+            "<b>Error:</b> " +
+            error +
+            "</div>";
 
     }
-);
+
+}
+
+
+function renderResult(data) {
+
+    if (!data.actual_components) {
+
+        document.getElementById(
+            "result"
+        ).innerHTML =
+            "<div class='card'>" +
+            "<h2>Parser Error</h2>" +
+            "<pre>" +
+            JSON.stringify(
+                data,
+                null,
+                2
+            ) +
+            "</pre>" +
+            "</div>";
+
+        return;
+    }
+
+    const a =
+        data.actual_components;
+
+    const d =
+        data.derived_metrics;
+
+    const statusClass =
+        data.status === "SUCCESS"
+            ? "success"
+            : "review";
+
+    let html = "";
+
+    html +=
+        "<div class='card'>";
+
+    html +=
+        "<h2>Parser result</h2>";
+
+    html +=
+        "<p class='" +
+        statusClass +
+        "'>" +
+        data.status +
+        "</p>";
+
+    html +=
+        "<p>" +
+        "Reporting period: " +
+        (data.reporting_period.start || "?") +
+        " → " +
+        (data.reporting_period.end || "?") +
+        "</p>";
+
+    html +=
+        "<h3>Glucose metrics</h3>";
+
+    html +=
+        "<div class='grid'>";
+
+    html += metric(
+        "Average glucose",
+        a.AVG_GLUCOSE,
+        "mmol/L"
+    );
+
+    html += metric(
+        "GMI",
+        a.GMI,
+        "%"
+    );
+
+    html += metric(
+        "CV",
+        a.CV,
+        "%"
+    );
+
+    html += metric(
+        "CGM active",
+        a.ACTIVE_TIME,
+        "%"
+    );
+
+    html += "</div>";
+
+    html +=
+        "<h3>Actual glucose ranges</h3>";
+
+    html +=
+        "<div class='grid'>";
+
+    html += metric(
+        "Very low",
+        a.VERY_LOW,
+        "%"
+    );
+
+    html += metric(
+        "Low",
+        a.LOW,
+        "%"
+    );
+
+    html += metric(
+        "In range",
+        a.IN_RANGE,
+        "%"
+    );
+
+    html += metric(
+        "High",
+        a.HIGH,
+        "%"
+    );
+
+    html += metric(
+        "Very high",
+        a.VERY_HIGH,
+        "%"
+    );
+
+    html += "</div>";
+
+    html +=
+        "<h3>Standardized</h3>";
+
+    html +=
+        "<div class='grid'>";
+
+    html += metric(
+        "TBR",
+        d.TBR,
+        "%"
+    );
+
+    html += metric(
+        "TIR",
+        d.TIR,
+        "%"
+    );
+
+    html += metric(
+        "TAR",
+        d.TAR,
+        "%"
+    );
+
+    html += "</div>";
+
+    if (
+        data.review_reasons &&
+        data.review_reasons.length
+    ) {
+
+        html +=
+            "<h3>Manual review</h3>";
+
+        html += "<ul>";
+
+        data.review_reasons.forEach(
+            function(reason) {
+
+                html +=
+                    "<li>" +
+                    reason +
+                    "</li>";
+
+            }
+        );
+
+        html += "</ul>";
+    }
+
+    html += "</div>";
+
+    document.getElementById(
+        "result"
+    ).innerHTML = html;
+}
+
+
+function metric(
+    label,
+    value,
+    unit
+) {
+
+    let display =
+        value === null ||
+        value === undefined
+            ? "—"
+            : value + " " + unit;
+
+    return (
+        "<div class='metric'>" +
+        "<strong>" +
+        label +
+        "</strong>" +
+        "<span>" +
+        display +
+        "</span>" +
+        "</div>"
+    );
+}
 
 </script>
 
@@ -1857,15 +2158,36 @@ document.getElementById(
 
 
 # ============================================================
-# LOCAL RUN
+# HOME
 # ============================================================
 
-if __name__ == "__main__":
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
+async def home():
 
-    import uvicorn
+    return HTML
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000
-    )
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.get(
+    "/health"
+)
+async def health():
+
+    return {
+        "status": "ok",
+        "parser": "UniversalCGMParser",
+        "version": "2.0.0"
+    }
+
+
+# ============================================================
+# RUN:
+#
+# uvicorn app:app --reload
+# ============================================================
