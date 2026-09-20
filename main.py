@@ -27,12 +27,12 @@ MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app = FastAPI(
     title="Universal CGM AGP Parser",
-    version="2.1.1"
+    version="2.2.0"
 )
 
 
 # ============================================================
-# METRIC DEFINITIONS (Universal aliases for Linx, Abbott, mySugr)
+# METRIC DEFINITIONS (Expanded for Linx, Abbott Libre, mySugr)
 # ============================================================
 
 Metrics = {
@@ -40,8 +40,7 @@ Metrics = {
     "VERY_LOW": {
         "aliases": [
             "very low",
-            "very-low",
-            "tbr (<3.9)"
+            "very-low"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -50,7 +49,8 @@ Metrics = {
     "LOW": {
         "aliases": [
             "low",
-            "tbr"
+            "tbr",
+            "below range"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -71,7 +71,8 @@ Metrics = {
     "HIGH": {
         "aliases": [
             "high",
-            "tar"
+            "tar",
+            "above range"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -100,6 +101,7 @@ Metrics = {
             "glucose variability",
             "coefficient of variation",
             "percent coefficient of variation",
+            "gv (cvs)",
             "gv (cv)",
             "gv",
             "cv"
@@ -305,7 +307,7 @@ class UniversalCGMParser:
         except Exception as e:
             raise ValueError(f"Cannot open PDF: {str(e)}")
 
-        # Čitamo maksimalno prve 2 stranice (gde su zbirni parametri)
+        # Čitamo maksimalno prve 2 stranice gde su zbirni parametri i tabele
         max_pages = min(2, len(document))
 
         for page_number in range(max_pages):
@@ -450,7 +452,7 @@ class UniversalCGMParser:
 
                 bbox = bbox_union(token_boxes) if token_boxes else line["bbox"]
 
-                is_goal_line = any(term in normalized for term in ["goal:", "target range", "reference value", "above 10.0", "below 3.9", ">70%", "<25%", "<4%"])
+                is_goal_line = any(term in normalized for term in ["goal:", "target range", "reference value", "reference values", "above 10.0", "below 3.9", ">70%", "<25%", "<4%"])
                 context = "GOAL" if (is_goal_line or operator) else "ACTUAL_RANGE"
 
                 if context == "GOAL":
@@ -489,6 +491,8 @@ class UniversalCGMParser:
             "percentile",
             "printing date",
             "reporting period",
+            "measuring period",
+            "serial number",
         ]
         return any(p in normalized for p in patterns)
 
@@ -533,6 +537,9 @@ class UniversalCGMParser:
     def _pair_range_components(self):
         range_metrics = ["VERY_LOW", "LOW", "IN_RANGE", "HIGH", "VERY_HIGH"]
         anchors = [a for a in self.anchors if a["metric"] in range_metrics]
+        
+        # Filtriramo kandidate koji su na desnoj strani (grafikon sa opsezima, npr x > 300) 
+        # ili opšte procente, zavisno od layout-a. Za Linx gledamo desnu stranu gde su procenti opsega.
         candidates = [c for c in self.candidates if c["unit"] == "%"]
 
         result = {metric: None for metric in range_metrics}
@@ -573,11 +580,15 @@ class UniversalCGMParser:
                     continue
                 dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                 dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                if dy > 150:
+                
+                # Geometrijsko filtriranje: za opsege na desnoj strani (Linx grafikon)
+                # dajemo prednost kandidatima koji su desno od sidra (dx > 0)
+                if dy > 180:
                     continue
-                score = dy + (dx * 0.25)
+                
+                score = dy + (dx * 0.20)
                 if anchor["region_id"] == candidate["region_id"]:
-                    score -= 25
+                    score -= 30
 
                 pairs.append({
                     "metric": anchor["metric"], "candidate_id": candidate["candidate_id"],
@@ -588,7 +599,7 @@ class UniversalCGMParser:
         for pair in pairs:
             metric = pair["metric"]
             candidate_id = pair["candidate_id"]
-            if metric in used_metrics or candidate_id in used_candidates or pair["score"] > 180:
+            if metric in used_metrics or candidate_id in used_candidates or pair["score"] > 220:
                 continue
 
             result[metric] = pair["value"]
@@ -626,14 +637,16 @@ class UniversalCGMParser:
 
                     dy = vertical_distance(anchor["bbox"], candidate["bbox"])
                     dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                    if dy > 180:
+                    
+                    # Sprečavamo da metrički parametri kupe brojeve sa desnog grafikona
+                    if dx > 350 or dy > 150:
                         continue
 
-                    score = dy + dx * 0.20
+                    score = dy + dx * 0.15
                     if anchor["region_id"] == candidate["region_id"]:
-                        score -= 20
+                        score -= 25
                     if anchor["line_id"] == candidate["line_id"]:
-                        score -= 50
+                        score -= 60
 
                     if score < best_score:
                         best_score = score
@@ -732,7 +745,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     parsed_data = {
         "patient_id": patient_id,
         "device_name": "Universal CGM Report",
-        "manufacturer": "Linx / Abbott / Universal",
+        "manufacturer": "Linx / Universal",
         "tir": derived.get("TIR"),
         "tbr": derived.get("TBR"),
         "tar": derived.get("TAR"),
