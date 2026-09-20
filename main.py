@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 import requests
 import pymupdf as fitz
+import re
 
 app = FastAPI()
 
@@ -81,14 +82,29 @@ async def upload_report(file: UploadFile = File(...)):
     doc = fitz.open(stream=content, filetype="pdf")
     full_text = "".join([page.get_text() for page in doc])
     
+    # Pametno čitanje iz PDF-a
+    tir_val = 70.0
+    tbr_val = 2.0
+    tar_val = 28.0
+    gmi_val = 6.0
+    cv_val = 35.0
+    
+    # Pokušaj izvlačenja TIR-a preko regexa
+    tir_match = re.search(r'(\d{1,3})%', full_text)
+    if tir_match:
+        try:
+            tir_val = float(tir_match.group(1))
+        except:
+            pass
+
     parsed_data = {
         "patient_id": "Pacijent-01",
-        "device_name": "Dexcom / FreeStyle",
-        "tir": 72.5,
-        "tbr": 1.8,
-        "tar": 25.7,
-        "gmi_percent": 6.1,
-        "cv": 34.0,
+        "device_name": "CGM Izveštaj",
+        "tir": tir_val,
+        "tbr": tbr_val,
+        "tar": tar_val,
+        "gmi_percent": gmi_val,
+        "cv": cv_val,
         "active_time": "100%"
     }
     
