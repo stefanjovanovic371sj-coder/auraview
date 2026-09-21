@@ -1,11 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 import sys
 import os
 
+# Ovo mora biti potpuno na vrhu pre bilo kakvog uvoza lokalnih modula
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
 from parsers.factory import get_parser_for_device, ParserNotImplementedError
 from database import save_report_to_db, fetch_reports_from_db
+
 
 app = FastAPI(title="Modular CGM AGP Platform", version="3.2.0")
 
