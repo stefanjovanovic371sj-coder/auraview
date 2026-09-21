@@ -43,7 +43,7 @@ Metrics = {
     "VERY_HIGH": {
         "aliases": [
             "very high", "very-high", "vrlo visoko", "веома високо", 
-            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "веома висок"
+            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "veoma висок"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -94,6 +94,7 @@ DATE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Podržava opcione razmake između broja i procenta (npr. 3% ili 3 %)
 NUMBER_PATTERN = re.compile(
     r"(?P<operator>[<>≤≥]?)\s*(?P<number>\d{1,3}(?:[.,]\d{1,2})?)\s*(?P<percent>%?)"
 )
@@ -162,7 +163,15 @@ class UniversalCGMParser:
         self._extract_candidates()
         self._extract_anchors()
 
-        range_values = self._pair_range_components()
+        # 1. Direktni linijski regex za TIR/TBR/TAR specifičan za mySugr (sa ili bez razmaka kod %)
+        range_values = self._parse_mysugr_direct_ranges()
+        
+        # 2. Geometrijski fallback ako neki parametar nije ulovljen direktno
+        geom_range_values = self._pair_range_components()
+        for k in range_values:
+            if range_values[k] is None:
+                range_values[k] = geom_range_values.get(k)
+
         metric_values = self._pair_standard_metrics()
 
         actual_components = {
@@ -297,6 +306,49 @@ class UniversalCGMParser:
                     "line_ids": [l["line_id"] for l in current]
                 })
 
+    def _parse_mysugr_direct_ranges(self) -> Dict[str, Optional[float]]:
+        """Hvata procente sa opcionim razmacima (npr: '3%', '3 %', '6 % Low')"""
+        results = {"VERY_LOW": None, "LOW": None, "IN_RANGE": None, "HIGH": None, "VERY_HIGH": None}
+        
+        patterns = {
+            "VERY_HIGH": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very high|веома високо|veoma visok)",
+                r"(?:very high|веома високо|veoma visok).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "HIGH": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:high|високо|visok)",
+                r"(?:high|високо|visok).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "IN_RANGE": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу)",
+                r"(?:in range|u opsegu|у опсегу).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "LOW": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:low|nisko|ниско|nizak)",
+                r"(?:low|nisko|ниско|nizak).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "VERY_LOW": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very low|vrlo nisko|веома ниско|veoma nizak)",
+                r"(?:very low|vrlo nisko|веома ниско|veoma nizak).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ]
+        }
+
+        for line in self.lines:
+            if any(term in line["normalized"] for term in ["target range", "ciljni opseg", "goal", "cilj", "above 10.0", "below 3.9"]):
+                continue
+            
+            for metric, regex_list in patterns.items():
+                if results[metric] is not None:
+                    continue
+                for reg in regex_list:
+                    m = re.search(reg, line["normalized"])
+                    if m:
+                        val = safe_float(m.group(1))
+                        if val is not None and val <= 100:
+                            results[metric] = val
+                            break
+        return results
+
     def _extract_candidates(self):
         candidates = []
         candidate_id = 0
@@ -320,23 +372,12 @@ class UniversalCGMParser:
                 if value is None:
                     continue
 
-                token_boxes = []
-                char_start = match.start()
-                char_end = match.end()
-                cursor = 0
+                # Ignorišemo minute i sate (npr. '0h 43min')
+                after_idx = match.end()
+                rest_of_text = text[after_idx:after_idx+10].lower()
+                if "min" in rest_of_text or "h" in rest_of_text:
+                    continue
 
-                for word in line["words"]:
-                    word_text = word["text"]
-                    start = text.find(word_text, cursor)
-                    if start < 0: continue
-                    end = start + len(word_text)
-                    cursor = end
-                    if end > char_start and start < char_end:
-                        token_boxes.append(word["bbox"])
-
-                bbox = bbox_union(token_boxes) if token_boxes else line["bbox"]
-
-                # Pametna detekcija GOAL linija samo ako kandidat zaista ima operator pored sebe (<7%, >70%)
                 is_goal = bool(operator) or any(term in normalized for term in [">70%", "<25%", "<4%", "goal: <", "cilj: <"])
                 context = "GOAL" if is_goal else "ACTUAL"
 
@@ -349,7 +390,7 @@ class UniversalCGMParser:
                     "candidate_id": candidate_id,
                     "value": value,
                     "unit": unit,
-                    "bbox": bbox,
+                    "bbox": line["bbox"],
                     "page": line["page"],
                     "line_id": line["line_id"],
                     "region_id": self._region_for_line(line["line_id"]),
@@ -403,37 +444,18 @@ class UniversalCGMParser:
         result = {metric: None for metric in range_metrics}
         used_candidates = set()
 
-        # 1. Traži brojeve u istoj horizontalnoj liniji (bilo levo ili desno od teksta)
         for anchor in anchors:
             best_cand = None
             min_dist = float("inf")
             for c in candidates:
                 if c["candidate_id"] in used_candidates or c["page"] != anchor["page"]:
                     continue
-                # Ako je vertikalno u ravni reči (do 15 piksela visinske razlike)
                 if vertical_distance(anchor["bbox"], c["bbox"]) <= 15:
                     h_dist = horizontal_distance(anchor["bbox"], c["bbox"])
                     if h_dist < min_dist:
                         min_dist = h_dist
                         best_cand = c
             
-            if best_cand:
-                result[anchor["metric"]] = best_cand["value"]
-                used_candidates.add(best_cand["candidate_id"])
-
-        # 2. Za preostale traži najbliže po vertikali
-        for anchor in anchors:
-            if result[anchor["metric"]] is not None:
-                continue
-            best_cand = None
-            min_dist = float("inf")
-            for c in candidates:
-                if c["candidate_id"] in used_candidates or c["page"] != anchor["page"]:
-                    continue
-                v_dist = vertical_distance(anchor["bbox"], c["bbox"])
-                if v_dist <= 120 and v_dist < min_dist:
-                    min_dist = v_dist
-                    best_cand = c
             if best_cand:
                 result[anchor["metric"]] = best_cand["value"]
                 used_candidates.add(best_cand["candidate_id"])
