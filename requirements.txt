@@ -3,5 +3,5 @@ uvicorn
 pymupdf
 requests
 pydantic
-python-multipart
 jinja2
+python-multipart
