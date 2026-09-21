@@ -4,14 +4,15 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
 
 # ============================================================
-# METRIC DEFINITIONS (Podržava i Engleski i Srpski)
+# DEFINICIJE METRIKA (Engleski, Srpska Latinica, Srpska Ćirilica)
 # ============================================================
 
 Metrics = {
     "VERY_LOW": {
         "aliases": [
             "very low", "very-low", "vrlo nisko", "веома ниско", 
-            "veoma nizak nivo", "veoma nizak", "веома низак ниво", "веома низак"
+            "veoma nizak nivo", "veoma nizak", "веома низак ниво", "веома низак",
+            "vrlo nizak nivo", "врло низак ниво"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -43,7 +44,8 @@ Metrics = {
     "VERY_HIGH": {
         "aliases": [
             "very high", "very-high", "vrlo visoko", "веома високо", 
-            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "веома висок"
+            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "веома висок",
+            "vrlo visok nivo", "врло висок ниво"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -60,7 +62,8 @@ Metrics = {
         "aliases": [
             "glucose variability", "coefficient of variation", "percent coefficient of variation",
             "gv (cvs)", "gv (cv)", "gv", "cv", "varijabilnost", "варијабилност",
-            "varijabilnost glukoze", "варијабилност глукозе", "koeficijent varijacije"
+            "varijabilnost glukoze", "варијабилност глукозе", "koeficijent varijacije",
+            "коефицијент варијације"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -69,7 +72,7 @@ Metrics = {
         "aliases": [
             "time cgm active", "time cgM active", "cgm active", "active time",
             "sensor active", "cgm coverage time", "coverage time",
-            "aktivno vreme cgm", "aktivno vreme", "активно време"
+            "aktivno vreme cgm", "aktivno vreme", "активно време", "активно време цгм"
         ],
         "unit": "%",
         "type": "METRIC"
@@ -77,7 +80,8 @@ Metrics = {
     "AVG_GLUCOSE": {
         "aliases": [
             "average glucose", "mean glucose", "mbg", "mean blood glucose",
-            "prosečna vrednost glukoze", "prosečna glukoza", "просечна вредност глукозе"
+            "prosečna vrednost glukoze", "prosečna glukoza", "просечна вредност глукозе",
+            "просечна глукоза"
         ],
         "unit": "GLUCOSE",
         "type": "METRIC"
@@ -162,23 +166,30 @@ class UniversalCGMParser:
         self._extract_candidates()
         self._extract_anchors()
 
-        # Direktno regex čitanje za mySugr
-        range_values = self._parse_mysugr_direct_ranges()
-        
-        # Geometrijska rezerva
-        geom_range_values = self._pair_range_components()
-        for k in range_values:
-            if range_values[k] is None:
-                range_values[k] = geom_range_values.get(k)
+        # DVOSTRUKA PROVERA (HYBRID PIPELINE):
+        # 1. Sloj: Direktna linijska pretraga (specifična za mySugr formate na svim jezicima)
+        direct_ranges = self._parse_mysugr_direct_ranges()
 
+        # 2. Sloj: Geometrijsko uparivanje iz originalnog koda
+        geom_ranges = self._pair_range_components()
+
+        # Spajanje: Ako direktni regex nije našao vrednost, uzima se geometrijska (fallback)
+        final_ranges = {}
+        for m in ["VERY_LOW", "LOW", "IN_RANGE", "HIGH", "VERY_HIGH"]:
+            if direct_ranges.get(m) is not None:
+                final_ranges[m] = direct_ranges[m]
+            else:
+                final_ranges[m] = geom_ranges.get(m)
+
+        # Standardne metrike (GMI, CV, Aktivno vreme, Glukoza)
         metric_values = self._pair_standard_metrics()
 
         actual_components = {
-            "VERY_LOW": range_values.get("VERY_LOW"),
-            "LOW": range_values.get("LOW"),
-            "IN_RANGE": range_values.get("IN_RANGE"),
-            "HIGH": range_values.get("HIGH"),
-            "VERY_HIGH": range_values.get("VERY_HIGH"),
+            "VERY_LOW": final_ranges.get("VERY_LOW"),
+            "LOW": final_ranges.get("LOW"),
+            "IN_RANGE": final_ranges.get("IN_RANGE"),
+            "HIGH": final_ranges.get("HIGH"),
+            "VERY_HIGH": final_ranges.get("VERY_HIGH"),
             "GMI": metric_values.get("GMI"),
             "CV": metric_values.get("CV"),
             "ACTIVE_TIME": metric_values.get("ACTIVE_TIME"),
@@ -306,46 +317,54 @@ class UniversalCGMParser:
                 })
 
     def _parse_mysugr_direct_ranges(self) -> Dict[str, Optional[float]]:
+        """
+        Direktna pretraga:
+        1. Prvo traži procente levo od teksta (npr. '0% Very high', '6% Low', '3% врло ниско')
+        2. Ako nema levo, traži desno od teksta (npr. 'U opsegu 90%', 'Nisko 6%')
+        3. Ignoriše ciljeve i zbirne zagrade
+        """
         results = {"VERY_LOW": None, "LOW": None, "IN_RANGE": None, "HIGH": None, "VERY_HIGH": None}
-        
-        # Redoslijed: prvo dvočlani pojmovi, pa onda jednostruki
-        patterns = {
-            "VERY_HIGH": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very high|веома високо|veoma visok)",
-                r"(?:very high|веома високо|veoma visok)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "VERY_LOW": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very low|vrlo nisko|веома ниско|veoma nizak)",
-                r"(?:very low|vrlo nisko|веома ниско|veoma nizak)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "HIGH": [
-                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:high|високо|visok)",
-                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(?:high|високо|visok)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "LOW": [
-                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:low|nisko|ниско|nizak)",
-                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(?:low|nisko|ниско|nizak)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "IN_RANGE": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу)",
-                r"(?:in range|u opsegu|у опсегу)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ]
-        }
 
         for line in self.lines:
-            if any(term in line["normalized"] for term in ["target range", "ciljni opseg", "goal", "cilj", "above 10.0", "below 3.9"]):
+            norm = line["normalized"]
+            if any(term in norm for term in ["target range", "ciljni opseg", "goal", "cilj", "above 10.0", "below 3.9", "each 5%", "svako povecanje", "свако повећање"]):
                 continue
-            
-            for metric, regex_list in patterns.items():
-                if results[metric] is not None:
-                    continue
-                for reg in regex_list:
-                    m = re.search(reg, line["normalized"])
-                    if m:
-                        val = safe_float(m.group(1))
-                        if val is not None and val <= 100:
-                            results[metric] = val
-                            break
+
+            # 1. VERY HIGH
+            if any(t in norm for t in ["very high", "веома високо", "veoma visoko", "veoma visok", "веома висок", "vrlo visoko", "врло високо"]):
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very\s*high|веома\s*високо|veoma\s*visoko|veoma\s*visok|веома\s*висок|vrlo\s*visoko|врло\s*високо)", norm)
+                if not m:
+                    m = re.search(r"(?:very\s*high|веома\s*високо|veoma\s*visoko|veoma\s*visok|веома\s*висок|vrlo\s*visoko|врло\s*високо)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
+                if m: results["VERY_HIGH"] = safe_float(m.group(1))
+
+            # 2. VERY LOW
+            elif any(t in norm for t in ["very low", "vrlo nisko", "врло ниско", "веома ниско", "veoma nizak", "веома низак", "veoma nisko"]):
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very\s*low|vrlo\s*nisko|врло\s*ниско|веома\s*ниско|veoma\s*nizak|веома\s*низак|veoma\s*nisko)", norm)
+                if not m:
+                    m = re.search(r"(?:very\s*low|vrlo\s*nisko|врло\s*ниско|веома\s*ниско|veoma\s*nizak|веома\s*низак|veoma\s*nisko)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
+                if m: results["VERY_LOW"] = safe_float(m.group(1))
+
+            # 3. IN RANGE
+            elif any(t in norm for t in ["in range", "u opsegu", "у опсегу", "normalno", "нормално"]):
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in\s*range|u\s*opsegu|у\s*опсегу|normalno|нормално)", norm)
+                if not m:
+                    m = re.search(r"(?:in\s*range|u\s*opsegu|у\s*опсегу|normalno|нормално)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
+                if m: results["IN_RANGE"] = safe_float(m.group(1))
+
+            # 4. HIGH (Osigurano da nije Very High)
+            elif any(t in norm for t in ["high", "високо", "visoko", "visok", "висок"]):
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:high|високо|visoko|visok|висок)", norm)
+                if not m:
+                    m = re.search(r"(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:high|високо|visoko|visok|висок)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
+                if m: results["HIGH"] = safe_float(m.group(1))
+
+            # 5. LOW (Osigurano da nije Very Low)
+            elif any(t in norm for t in ["low", "nisko", "ниско", "nizak", "низак"]):
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:low|nisko|ниско|nizak|низак)", norm)
+                if not m:
+                    m = re.search(r"(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:low|nisko|ниско|nizak|низак)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
+                if m: results["LOW"] = safe_float(m.group(1))
+
         return results
 
     def _extract_candidates(self):
@@ -371,13 +390,12 @@ class UniversalCGMParser:
                 if value is None:
                     continue
 
-                # Ignorisanje minuta i sati npr. '(0h 43min)'
                 after_idx = match.end()
                 rest_of_text = text[after_idx:after_idx+10].lower()
                 if "min" in rest_of_text or "h" in rest_of_text:
                     continue
 
-                is_goal = bool(operator) or any(term in normalized for term in [">70%", "<25%", "<4%", "goal: <", "cilj: <"])
+                is_goal = bool(operator) or any(term in normalized for term in [">70%", "<25%", "<4%", "goal: <", "cilj: <", "cilj:<"])
                 context = "GOAL" if is_goal else "ACTUAL"
 
                 unit = "%"
@@ -403,8 +421,9 @@ class UniversalCGMParser:
         patterns = [
             "1% of time", "about 15 min", "defined as percent",
             "median", "percentile", "printing date", "datum stampanja", 
-            "datum štampanja", "svako povecanje", "svako povećanje",
-            "each 5% increase", "clinically beneficial", "klinički korisnim"
+            "datum štampanja", "датум штампања", "svako povecanje", 
+            "svako povećanje", "свако повећање", "each 5% increase", 
+            "clinically beneficial", "klinički korisnim", "клинички корисним"
         ]
         return any(p in normalized for p in patterns)
 
