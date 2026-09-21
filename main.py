@@ -1,18 +1,19 @@
 import sys
 import os
 
-# Postavlja apsolutnu putanju direktorijuma u kome se nalazi main.py
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT_DIR)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-# Sada će Python sigurno pronaći parsers folder bez obzira odakle Render pokreće server
 from parsers.factory import get_parser_for_device, ParserNotImplementedError
 from database import save_report_to_db, fetch_reports_from_db
+
+app = FastAPI(title="Modular CGM AGP Platform", version="3.3.2")
+# ... ostatak tvog koda ...
+
 
 app = FastAPI(title="Modular CGM AGP Platform", version="3.2.0")
 
