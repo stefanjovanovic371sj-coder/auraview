@@ -12,7 +12,7 @@ Metrics = {
         "aliases": [
             "very low", "very-low", "vrlo nisko", "веома ниско", 
             "veoma nizak nivo", "veoma nizak", "веома низак ниво", "веома низак",
-            "vrlo nizak nivo", "врло низак ниво"
+            "vrlo nizak nivo", "врло низак ниво", "veoma nisko"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -70,7 +70,7 @@ Metrics = {
     },
     "ACTIVE_TIME": {
         "aliases": [
-            "time cgm active", "time cgM active", "cgm active", "active time",
+            "time cgm active", "time cgm active", "cgm active", "active time",
             "sensor active", "cgm coverage time", "coverage time",
             "aktivno vreme cgm", "aktivno vreme", "активно време", "активно време цгм"
         ],
@@ -166,30 +166,23 @@ class UniversalCGMParser:
         self._extract_candidates()
         self._extract_anchors()
 
-        # DVOSTRUKA PROVERA (HYBRID PIPELINE):
-        # 1. Sloj: Direktna linijska pretraga (specifična za mySugr formate na svim jezicima)
-        direct_ranges = self._parse_mysugr_direct_ranges()
+        # 1. Direktno čitanje iz vizuelno složenih linija
+        range_values = self._parse_mysugr_direct_ranges()
 
-        # 2. Sloj: Geometrijsko uparivanje iz originalnog koda
-        geom_ranges = self._pair_range_components()
+        # 2. Geometrijska dopuna za polja koja nisu nađena direktno
+        geom_range_values = self._pair_range_components()
+        for k in range_values:
+            if range_values[k] is None:
+                range_values[k] = geom_range_values.get(k)
 
-        # Spajanje: Ako direktni regex nije našao vrednost, uzima se geometrijska (fallback)
-        final_ranges = {}
-        for m in ["VERY_LOW", "LOW", "IN_RANGE", "HIGH", "VERY_HIGH"]:
-            if direct_ranges.get(m) is not None:
-                final_ranges[m] = direct_ranges[m]
-            else:
-                final_ranges[m] = geom_ranges.get(m)
-
-        # Standardne metrike (GMI, CV, Aktivno vreme, Glukoza)
         metric_values = self._pair_standard_metrics()
 
         actual_components = {
-            "VERY_LOW": final_ranges.get("VERY_LOW"),
-            "LOW": final_ranges.get("LOW"),
-            "IN_RANGE": final_ranges.get("IN_RANGE"),
-            "HIGH": final_ranges.get("HIGH"),
-            "VERY_HIGH": final_ranges.get("VERY_HIGH"),
+            "VERY_LOW": range_values.get("VERY_LOW"),
+            "LOW": range_values.get("LOW"),
+            "IN_RANGE": range_values.get("IN_RANGE"),
+            "HIGH": range_values.get("HIGH"),
+            "VERY_HIGH": range_values.get("VERY_HIGH"),
             "GMI": metric_values.get("GMI"),
             "CV": metric_values.get("CV"),
             "ACTIVE_TIME": metric_values.get("ACTIVE_TIME"),
@@ -258,30 +251,60 @@ class UniversalCGMParser:
         document.close()
 
     def _build_lines(self):
-        grouped = {}
-        for word in self.words:
-            key = (word["page"], word["block_no"], word["line_no"])
-            grouped.setdefault(key, []).append(word)
-
+        """
+        Grupisanje reči po stvarnim vizuelnim linijama na stranici (Y tolerancija 6 tačaka).
+        Ovo eliminiše problem razbijanja teksta u kolone i spaja npr. '0%' i 'Very high' u isti red.
+        """
         lines = []
         line_id = 0
-        for key, words in grouped.items():
-            words = sorted(words, key=lambda w: w["x0"])
-            text = " ".join(w["text"] for w in words)
-            bbox = bbox_union([w["bbox"] for w in words])
-            lines.append({
-                "line_id": line_id,
-                "page": key[0],
-                "block_no": key[1],
-                "line_no": key[2],
-                "text": text,
-                "normalized": normalize_text(text),
-                "bbox": bbox,
-                "words": words
-            })
-            line_id += 1
+        for page_number in range(1, len(self.pages) + 1):
+            page_words = [w for w in self.words if w["page"] == page_number]
+            page_words.sort(key=lambda w: (w["y0"], w["x0"]))
 
-        self.lines = sorted(lines, key=lambda x: (x["page"], x["bbox"][1], x["bbox"][0]))
+            current_line = []
+            current_y_mid = None
+
+            for w in page_words:
+                w_y_mid = (w["y0"] + w["y1"]) / 2
+                if current_y_mid is None:
+                    current_line.append(w)
+                    current_y_mid = w_y_mid
+                elif abs(w_y_mid - current_y_mid) <= 6.0:
+                    current_line.append(w)
+                    current_y_mid = sum((x["y0"] + x["y1"]) / 2 for x in current_line) / len(current_line)
+                else:
+                    current_line.sort(key=lambda x: x["x0"])
+                    text = " ".join(x["text"] for x in current_line)
+                    lines.append({
+                        "line_id": line_id,
+                        "page": page_number,
+                        "block_no": current_line[0]["block_no"],
+                        "line_no": current_line[0]["line_no"],
+                        "text": text,
+                        "normalized": normalize_text(text),
+                        "bbox": bbox_union([x["bbox"] for x in current_line]),
+                        "words": current_line
+                    })
+                    line_id += 1
+                    current_line = [w]
+                    current_y_mid = w_y_mid
+
+            if current_line:
+                current_line.sort(key=lambda x: x["x0"])
+                text = " ".join(x["text"] for x in current_line)
+                lines.append({
+                    "line_id": line_id,
+                    "page": page_number,
+                    "block_no": current_line[0]["block_no"],
+                    "line_no": current_line[0]["line_no"],
+                    "text": text,
+                    "normalized": normalize_text(text),
+                    "bbox": bbox_union([x["bbox"] for x in current_line]),
+                    "words": current_line
+                })
+                line_id += 1
+
+        self.lines = lines
 
     def _build_regions(self):
         self.regions = []
@@ -289,17 +312,9 @@ class UniversalCGMParser:
             page_lines = [l for l in self.lines if l["page"] == page_number]
             if not page_lines: continue
 
-            current = []
-            region_id = 0
+            current, region_id = [], 0
             for line in page_lines:
-                if not current:
-                    current = [line]
-                    continue
-                previous = current[-1]
-                gap = line["bbox"][1] - previous["bbox"][3]
-                same_block = line["block_no"] == previous["block_no"]
-
-                if gap <= 45 or same_block:
+                if not current or line["bbox"][1] - current[-1]["bbox"][3] <= 45:
                     current.append(line)
                 else:
                     self.regions.append({
@@ -317,12 +332,6 @@ class UniversalCGMParser:
                 })
 
     def _parse_mysugr_direct_ranges(self) -> Dict[str, Optional[float]]:
-        """
-        Direktna pretraga:
-        1. Prvo traži procente levo od teksta (npr. '0% Very high', '6% Low', '3% врло ниско')
-        2. Ako nema levo, traži desno od teksta (npr. 'U opsegu 90%', 'Nisko 6%')
-        3. Ignoriše ciljeve i zbirne zagrade
-        """
         results = {"VERY_LOW": None, "LOW": None, "IN_RANGE": None, "HIGH": None, "VERY_HIGH": None}
 
         for line in self.lines:
@@ -330,37 +339,37 @@ class UniversalCGMParser:
             if any(term in norm for term in ["target range", "ciljni opseg", "goal", "cilj", "above 10.0", "below 3.9", "each 5%", "svako povecanje", "свако повећање"]):
                 continue
 
-            # 1. VERY HIGH
+            # 1. VERY HIGH (prvenstveno broj ispred teksta: npr. '0% Very high')
             if any(t in norm for t in ["very high", "веома високо", "veoma visoko", "veoma visok", "веома висок", "vrlo visoko", "врло високо"]):
                 m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very\s*high|веома\s*високо|veoma\s*visoko|veoma\s*visok|веома\s*висок|vrlo\s*visoko|врло\s*високо)", norm)
                 if not m:
                     m = re.search(r"(?:very\s*high|веома\s*високо|veoma\s*visoko|veoma\s*visok|веома\s*висок|vrlo\s*visoko|врло\s*високо)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
                 if m: results["VERY_HIGH"] = safe_float(m.group(1))
 
-            # 2. VERY LOW
+            # 2. VERY LOW (prvenstveno broj ispred teksta: npr. '3% Very low')
             elif any(t in norm for t in ["very low", "vrlo nisko", "врло ниско", "веома ниско", "veoma nizak", "веома низак", "veoma nisko"]):
                 m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very\s*low|vrlo\s*nisko|врло\s*ниско|веома\s*ниско|veoma\s*nizak|веома\s*низак|veoma\s*nisko)", norm)
                 if not m:
                     m = re.search(r"(?:very\s*low|vrlo\s*nisko|врло\s*ниско|веома\s*ниско|veoma\s*nizak|веома\s*низак|veoma\s*nisko)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
                 if m: results["VERY_LOW"] = safe_float(m.group(1))
 
-            # 3. IN RANGE
+            # 3. IN RANGE (npr. '90% In range')
             elif any(t in norm for t in ["in range", "u opsegu", "у опсегу", "normalno", "нормално"]):
                 m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in\s*range|u\s*opsegu|у\s*опсегу|normalno|нормално)", norm)
                 if not m:
                     m = re.search(r"(?:in\s*range|u\s*opsegu|у\s*опсегу|normalno|нормално)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
                 if m: results["IN_RANGE"] = safe_float(m.group(1))
 
-            # 4. HIGH (Osigurano da nije Very High)
+            # 4. HIGH (striktno bez 'very' ispred: npr. '1% High')
             elif any(t in norm for t in ["high", "високо", "visoko", "visok", "висок"]):
-                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:high|високо|visoko|visok|висок)", norm)
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:high|високо|visoko|visok|висок)\b", norm)
                 if not m:
                     m = re.search(r"(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:high|високо|visoko|visok|висок)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
                 if m: results["HIGH"] = safe_float(m.group(1))
 
-            # 5. LOW (Osigurano da nije Very Low)
+            # 5. LOW (striktno bez 'very' ispred: npr. '6% Low')
             elif any(t in norm for t in ["low", "nisko", "ниско", "nizak", "низак"]):
-                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:low|nisko|ниско|nizak|низак)", norm)
+                m = re.search(r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:low|nisko|ниско|nizak|низак)\b", norm)
                 if not m:
                     m = re.search(r"(?<!very\s)(?<!veoma\s)(?<!веома\s)(?<!vrlo\s)(?<!врло\s)(?:low|nisko|ниско|nizak|низак)\s*(\d{1,2}(?:[.,]\d+)?)\s*%", norm)
                 if m: results["LOW"] = safe_float(m.group(1))
@@ -375,10 +384,7 @@ class UniversalCGMParser:
             text = line["text"]
             normalized = line["normalized"]
 
-            if self._is_descriptive_line(normalized):
-                continue
-
-            if DATE_PATTERN.search(text):
+            if self._is_descriptive_line(normalized) or DATE_PATTERN.search(text):
                 continue
 
             for match in NUMBER_PATTERN.finditer(text):
@@ -387,9 +393,9 @@ class UniversalCGMParser:
                 percent = match.group("percent")
 
                 value = safe_float(raw_number)
-                if value is None:
-                    continue
+                if value is None: continue
 
+                # Ignorisanje oznaka za sate i minute (npr. '0h 43min')
                 after_idx = match.end()
                 rest_of_text = text[after_idx:after_idx+10].lower()
                 if "min" in rest_of_text or "h" in rest_of_text:
@@ -437,11 +443,23 @@ class UniversalCGMParser:
         anchors = []
         anchor_id = 0
 
+        # Sortiramo metrike tako da dvočlani nazivi imaju prioritet nad jednorečnim
+        priority_order = ["VERY_HIGH", "VERY_LOW", "IN_RANGE", "HIGH", "LOW", "GMI", "CV", "ACTIVE_TIME", "AVG_GLUCOSE"]
+
         for line in self.lines:
             normalized = line["normalized"]
-            for metric, definition in Metrics.items():
+            matched_for_line = set()
+
+            for metric in priority_order:
+                definition = Metrics[metric]
                 for alias in definition["aliases"]:
-                    if alias in normalized:
+                    # Koristimo granice reči da 'low' ne matchuje 'very low'
+                    pattern = rf"\b{re.escape(alias)}\b"
+                    if re.search(pattern, normalized):
+                        # Zaštita: ako je na liniji već nađen VERY_LOW, ne dodajemo običan LOW
+                        if metric == "LOW" and "VERY_LOW" in matched_for_line: continue
+                        if metric == "HIGH" and "VERY_HIGH" in matched_for_line: continue
+
                         anchors.append({
                             "anchor_id": anchor_id,
                             "metric": metric,
@@ -451,6 +469,7 @@ class UniversalCGMParser:
                             "bbox": line["bbox"],
                         })
                         anchor_id += 1
+                        matched_for_line.add(metric)
                         break
         self.anchors = anchors
 
@@ -463,6 +482,8 @@ class UniversalCGMParser:
         used_candidates = set()
 
         for anchor in anchors:
+            if result[anchor["metric"]] is not None:
+                continue
             best_cand = None
             min_dist = float("inf")
             for c in candidates:
