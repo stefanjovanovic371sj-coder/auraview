@@ -2,16 +2,19 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
+import os
 
 from parser import UniversalCGMParser
 from database import save_report_to_db, fetch_reports_from_db
 
 app = FastAPI(
     title="Universal CGM AGP Modular System",
-    version="3.0.0"
+    version="3.0.1"
 )
 
-templates = Jinja2Templates(directory="templates")
+# Osiguravamo preciznu putanju do templates foldera
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -48,13 +51,14 @@ def get_reports():
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    # Ispravljen redosled argumenata za novije verzije Starlette-a
+    return templates.TemplateResponse(request, "index.html", {})
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def doctor_dashboard(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    # Ispravljen redosled argumenata za novije verzije Starlette-a
+    return templates.TemplateResponse(request, "dashboard.html", {})
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
