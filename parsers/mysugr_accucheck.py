@@ -43,7 +43,7 @@ Metrics = {
     "VERY_HIGH": {
         "aliases": [
             "very high", "very-high", "vrlo visoko", "веома високо", 
-            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "veoma висок"
+            "veoma visoko", "veoma visok nivo", "veoma visok", "веома висок ниво", "веома висок"
         ],
         "unit": "%",
         "type": "RANGE_COMPONENT"
@@ -94,7 +94,6 @@ DATE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Podržava opcione razmake između broja i procenta (npr. 3% ili 3 %)
 NUMBER_PATTERN = re.compile(
     r"(?P<operator>[<>≤≥]?)\s*(?P<number>\d{1,3}(?:[.,]\d{1,2})?)\s*(?P<percent>%?)"
 )
@@ -163,10 +162,10 @@ class UniversalCGMParser:
         self._extract_candidates()
         self._extract_anchors()
 
-        # 1. Direktni linijski regex za TIR/TBR/TAR specifičan za mySugr (sa ili bez razmaka kod %)
+        # Direktno regex čitanje za mySugr
         range_values = self._parse_mysugr_direct_ranges()
         
-        # 2. Geometrijski fallback ako neki parametar nije ulovljen direktno
+        # Geometrijska rezerva
         geom_range_values = self._pair_range_components()
         for k in range_values:
             if range_values[k] is None:
@@ -307,29 +306,29 @@ class UniversalCGMParser:
                 })
 
     def _parse_mysugr_direct_ranges(self) -> Dict[str, Optional[float]]:
-        """Hvata procente sa opcionim razmacima (npr: '3%', '3 %', '6 % Low')"""
         results = {"VERY_LOW": None, "LOW": None, "IN_RANGE": None, "HIGH": None, "VERY_HIGH": None}
         
+        # Redoslijed: prvo dvočlani pojmovi, pa onda jednostruki
         patterns = {
             "VERY_HIGH": [
                 r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very high|веома високо|veoma visok)",
-                r"(?:very high|веома високо|veoma visok).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "HIGH": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:high|високо|visok)",
-                r"(?:high|високо|visok).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "IN_RANGE": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу)",
-                r"(?:in range|u opsegu|у опсегу).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
-            ],
-            "LOW": [
-                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:low|nisko|ниско|nizak)",
-                r"(?:low|nisko|ниско|nizak).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+                r"(?:very high|веома високо|veoma visok)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
             ],
             "VERY_LOW": [
                 r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:very low|vrlo nisko|веома ниско|veoma nizak)",
-                r"(?:very low|vrlo nisko|веома ниско|veoma nizak).*?(\d{1,2}(?:[.,]\d+)?)\s*%"
+                r"(?:very low|vrlo nisko|веома ниско|veoma nizak)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "HIGH": [
+                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:high|високо|visok)",
+                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(?:high|високо|visok)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "LOW": [
+                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:low|nisko|ниско|nizak)",
+                r"(?<!very\s)(?<!веома\s)(?<!veoma\s)(?:low|nisko|ниско|nizak)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
+            ],
+            "IN_RANGE": [
+                r"(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу)",
+                r"(?:in range|u opsegu|у опсегу)\s*(\d{1,2}(?:[.,]\d+)?)\s*%"
             ]
         }
 
@@ -372,7 +371,7 @@ class UniversalCGMParser:
                 if value is None:
                     continue
 
-                # Ignorišemo minute i sate (npr. '0h 43min')
+                # Ignorisanje minuta i sati npr. '(0h 43min)'
                 after_idx = match.end()
                 rest_of_text = text[after_idx:after_idx+10].lower()
                 if "min" in rest_of_text or "h" in rest_of_text:
