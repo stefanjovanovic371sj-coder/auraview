@@ -1,10 +1,10 @@
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import re
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
 
 # ============================================================
-# DEFINICIJE METRIKA (Ažurirano sa tačnim srpskim izrazima)
+# DEFINICIJE METRIKA (Ažurirano sa srpskim izrazima)
 # ============================================================
 Metrics = {
     "VERY_LOW": {"aliases": ["very low", "very-low", "vrlo nisko", "веома ниско", "veoma nizak nivo"], "unit": "%", "type": "RANGE_COMPONENT"},
@@ -153,7 +153,8 @@ class UniversalCGMParser:
             grouped.setdefault((word["page"], word["block_no"], word["line_no"]), []).append(word)
         lines = []
         for key, words in grouped.items():
-            words = sorted(words, key=lambda w: w["x0"])
+            # OVDE JE BILA GREŠKA: sortiramo po x koordinati iz bbox-a
+            words = sorted(words, key=lambda w: w["bbox"][0])
             text = " ".join(w["text"] for w in words)
             lines.append({
                 "line_id": len(lines), 
@@ -267,7 +268,6 @@ class UniversalCGMParser:
         h = actual.get("HIGH")
         vh = actual.get("VERY_HIGH")
         
-        # Bezbedno računanje čak i ako je neka vrednost ostala neprepoznata
         tbr_val = round((vl or 0) + (l or 0), 2) if (vl is not None or l is not None) else None
         tar_val = round((h or 0) + (vh or 0), 2) if (h is not None or vh is not None) else None
         
