@@ -1,15 +1,24 @@
 import sys
 import os
 
+# Osiguravamo da Python uvek vidi glavni folder i podfoldere
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+# Ponovo importujemo iz parsers foldera
 from parsers.factory import get_parser_for_device, ParserNotImplementedError
 from database import save_report_to_db, fetch_reports_from_db
+
+app = FastAPI(title="Modular CGM AGP Platform", version="3.6.0")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
 
 app = FastAPI(title="Modular CGM AGP Platform", version="3.3.2")
 # ... ostatak tvog koda ...
