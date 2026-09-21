@@ -4,3 +4,4 @@ pymupdf
 requests
 pydantic
 python-multipart
+jinja2
