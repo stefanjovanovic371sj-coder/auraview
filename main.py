@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+import sys
 import os
 
 from parsers.factory import get_parser_for_device, ParserNotImplementedError
