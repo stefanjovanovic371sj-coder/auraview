@@ -26,8 +26,8 @@ MAX_FILE_SIZE_MB = 15
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 app = FastAPI(
-    title="Universal CGM AGP Parser",
-    version="2.3.1"
+    title="Universal CGM AGP Parser - Modern UI",
+    version="2.4.0"
 )
 
 
@@ -287,7 +287,7 @@ def horizontal_distance(a: List[float], b: List[float]) -> float:
 
 
 # ============================================================
-# UNIVERSAL PARSER
+# UNIVERSAL PARSER (Full & Robust)
 # ============================================================
 
 class UniversalCGMParser:
@@ -802,10 +802,9 @@ async def upload_pdf(file: UploadFile = File(...)):
         "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
     }
     
-    try:
-        requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data, timeout=10)
-    except Exception:
-        pass
+    db_response = requests.post(f"{SUPABASE_URL}/rest/v1/cgm_reports", headers=SUPABASE_HEADERS, json=parsed_data, timeout=10)
+    print("STATUS BAZE:", db_response.status_code)
+    print("ODGOVOR BAZE:", db_response.text)
         
     return {"status": report["status"], "data": parsed_data, "report": report}
 
@@ -819,7 +818,7 @@ def get_reports():
 
 
 # ============================================================
-# FRONTEND / DASHBOARDS
+# FRONTEND / MODERN TAILWIND UI
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -836,68 +835,131 @@ HTML = """
 <html lang="sr">
 <head>
 <meta charset="UTF-8">
-<title>Universal CGM AGP Parser</title>
-<style>
-body { font-family: Arial, sans-serif; background: #f5f7fa; padding: 30px; margin: 0; }
-.container { max-width: 1100px; margin: auto; }
-.card { background: white; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
-button { padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; background: #0d9488; color: white; font-size: 15px; font-weight: bold; }
-pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #eee; padding: 20px; border-radius: 8px; overflow-x: auto; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-.metric { background: #f0f2f5; padding: 16px; border-radius: 8px; }
-.metric strong { display: block; font-size: 12px; color: #666; margin-bottom: 5px; }
-.metric span { font-size: 24px; font-weight: bold; }
-.success { color: green; font-weight: bold; }
-.review { color: #b36b00; font-weight: bold; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Universal CGM AGP Parser — Modern UI</title>
+<script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-<div class="container">
-<div class="card">
-<h1>Universal CGM / AGP Parser</h1>
-<p>Unesite bilo koji podržani CGM AGP PDF za parsiranje i sinhronizaciju.</p>
-<input id="file" type="file" accept=".pdf"><br><br>
-<button onclick="parseFile()">Parsiraj & Sačuvaj PDF</button>
-<a href="/dashboard" style="margin-left: 15px; color: #0d9488; font-weight: bold; text-decoration: none;">Idi na Lekarski Panel →</a>
-</div>
-<div id="result"></div>
-<div class="card">
-<h2>Debug JSON</h2>
-<pre id="json">Još uvek nema rezultata.</pre>
-</div>
-</div>
+<body class="bg-slate-900 text-slate-100 min-h-screen py-10 px-4 flex flex-col items-center">
+    <div class="w-full max-w-4xl">
+        <header class="flex justify-between items-center mb-8 bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+            <div>
+                <h1 class="text-2xl font-bold text-teal-400">CGM AGP Analizator</h1>
+                <p class="text-slate-400 text-sm mt-1">Sistem za bezbednu i preciznu obradu medicinskih izveštaja.</p>
+            </div>
+            <a href="/dashboard" class="bg-teal-600 hover:bg-teal-500 text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition shadow-lg">Lekarski Panel →</a>
+        </header>
+
+        <!-- Upload Card -->
+        <div class="bg-slate-800 border-2 border-dashed border-slate-700 rounded-2xl p-8 text-center hover:border-teal-500 transition shadow-xl mb-8">
+            <input type="file" id="file" accept=".pdf" class="hidden" onchange="parseFile(this.files[0])">
+            <label for="file" class="cursor-pointer flex flex-col items-center">
+                <svg class="w-14 h-14 text-teal-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                <span class="text-lg font-medium text-slate-200">Kliknite ili prevucite PDF izveštaj ovde</span>
+                <span class="text-xs text-slate-500 mt-1">Podržava mySugr, Accu-Check, Linx i standardne AGP formate</span>
+            </label>
+        </div>
+
+        <!-- Loader -->
+        <div id="loader" class="hidden text-center my-10">
+            <div class="inline-block animate-spin rounded-full h-10 w-10 border-4 border-teal-500 border-t-transparent"></div>
+            <p class="text-slate-400 mt-3 font-medium">Napredna analiza dokumenta u toku...</p>
+        </div>
+
+        <!-- Results Section -->
+        <div id="result" class="space-y-6"></div>
+
+        <!-- Debug JSON Box -->
+        <div class="mt-8 bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-xl">
+            <h2 class="text-sm font-semibold text-teal-400 uppercase tracking-wider mb-3">Debug / Sirovi podaci</h2>
+            <pre id="json" class="bg-slate-900 text-slate-300 p-4 rounded-xl text-xs overflow-x-auto max-h-60">Još uvek nema učitanih izveštaja.</pre>
+        </div>
+    </div>
+
 <script>
-async function parseFile() {
-    const fileInput = document.getElementById("file");
-    if (!fileInput.files.length) { alert("Izaberite PDF fajl."); return; }
+async function parseFile(file) {
+    if (!file) return;
     const formData = new FormData();
-    formData.append("file", fileInput.files[0]);
-    document.getElementById("result").innerHTML = "<div class='card'>Parsiranje i sinhronizacija u toku...</div>";
+    formData.append("file", file);
+    
+    document.getElementById("loader").classList.remove("hidden");
+    document.getElementById("result").innerHTML = "";
+    document.getElementById("json").textContent = "Obrada u toku...";
+
     try {
         const response = await fetch("/upload", { method: "POST", body: formData });
         const data = await response.json();
         renderResult(data.report);
         document.getElementById("json").textContent = JSON.stringify(data, null, 2);
     } catch (error) {
-        document.getElementById("result").innerHTML = "<div class='card'><b>Greška:</b> " + error + "</div>";
+        document.getElementById("result").innerHTML = `<div class="bg-rose-900/50 border border-rose-700 p-4 rounded-xl text-rose-200 font-semibold">Došlo je do greške pri obradi fajla.</div>`;
+    } finally {
+        document.getElementById("loader").classList.add("hidden");
     }
 }
+
 function renderResult(data) {
-    if (!data.actual_components) { document.getElementById("result").innerHTML = "<pre>" + JSON.stringify(data, null, 2) + "</pre>"; return; }
-    const a = data.actual_components; const d = data.derived_metrics;
-    let html = "<div class='card'><h2>Rezultat parsiranja</h2><p class='" + (data.status === "SUCCESS" ? "success" : "review") + "'>" + data.status + "</p>";
-    html += "<p>Period: " + (data.reporting_period.start || "?") + " → " + (data.reporting_period.end || "?") + "</p><h3>Metrike</h3><div class='grid'>";
-    html += metric("Prosečna glukoza", a.AVG_GLUCOSE, "mmol/L") + metric("GMI", a.GMI, "%") + metric("CV", a.CV, "%") + metric("Aktivno vreme", a.ACTIVE_TIME, "%");
-    html += "</div><h3>Opsezi</h3><div class='grid'>";
-    html += metric("Vrlo nisko", a.VERY_LOW, "%") + metric("Nisko", a.LOW, "%") + metric("U opsegu", a.IN_RANGE, "%") + metric("Visoko", a.HIGH, "%") + metric("Vrlo visoko", a.VERY_HIGH, "%");
-    html += "</div><h3>Standardizovano</h3><div class='grid'>";
-    html += metric("TBR", d.TBR, "%") + metric("TIR", d.TIR, "%") + metric("TAR", d.TAR, "%");
-    html += "</div></div>";
+    if (!data.actual_components) { 
+        document.getElementById("result").innerHTML = `<div class="bg-slate-800 p-6 rounded-2xl text-slate-300">Greška u strukturi podataka.</div>`; 
+        return; 
+    }
+    const a = data.actual_components; 
+    const d = data.derived_metrics;
+    
+    let statusBadge = data.status === "SUCCESS" 
+        ? '<span class="bg-emerald-900/80 text-emerald-300 px-3 py-1 rounded-full text-xs font-bold border border-emerald-700">USPEŠNO OČITANO</span>' 
+        : '<span class="bg-amber-900/80 text-amber-300 px-3 py-1 rounded-full text-xs font-bold border border-amber-700">POTREBNA PROVERA</span>';
+
+    let html = `
+    <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-xl space-y-6">
+        <div class="flex justify-between items-center border-b border-slate-700 pb-4">
+            <div>
+                <h2 class="text-xl font-bold text-teal-300">Rezultat analize izveštaja</h2>
+                <p class="text-slate-400 text-xs mt-1">Period: <span class="text-slate-200 font-medium">${data.reporting_period.start || '?'} → ${data.reporting_period.end || '?'}</span></p>
+            </div>
+            <div>${statusBadge}</div>
+        </div>
+
+        <div>
+            <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Ključni AGP Parametri</h3>
+            <div class="grid grid-cols-3 gap-4 text-center">
+                <div class="bg-slate-900/60 p-4 rounded-xl border border-slate-700/50">
+                    <span class="block text-xs font-semibold text-rose-400 uppercase">TBR (Nisko)</span>
+                    <span class="text-2xl font-bold text-slate-100 mt-1 block">${d.TBR !== null ? d.TBR + '%' : '—'}</span>
+                </div>
+                <div class="bg-slate-900/60 p-4 rounded-xl border border-slate-700/50">
+                    <span class="block text-xs font-semibold text-emerald-400 uppercase">TIR (U opsegu)</span>
+                    <span class="text-2xl font-bold text-slate-100 mt-1 block">${d.TIR !== null ? d.TIR + '%' : '—'}</span>
+                </div>
+                <div class="bg-slate-900/60 p-4 rounded-xl border border-slate-700/50">
+                    <span class="block text-xs font-semibold text-amber-400 uppercase">TAR (Visoko)</span>
+                    <span class="text-2xl font-bold text-slate-100 mt-1 block">${d.TAR !== null ? d.TAR + '%' : '—'}</span>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Detaljne Metrike</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div class="bg-slate-900/40 p-3 rounded-xl border border-slate-700/30">
+                    <span class="block text-[11px] text-slate-400">Prosečna glukoza</span>
+                    <span class="text-lg font-bold text-slate-100">${a.AVG_GLUCOSE !== null ? a.AVG_GLUCOSE + ' mmol/L' : '—'}</span>
+                </div>
+                <div class="bg-slate-900/40 p-3 rounded-xl border border-slate-700/30">
+                    <span class="block text-[11px] text-slate-400">GMI</span>
+                    <span class="text-lg font-bold text-slate-100">${a.GMI !== null ? a.GMI + '%' : '—'}</span>
+                </div>
+                <div class="bg-slate-900/40 p-3 rounded-xl border border-slate-700/30">
+                    <span class="block text-[11px] text-slate-400">CV (Varijabilnost)</span>
+                    <span class="text-lg font-bold text-slate-100">${a.CV !== null ? a.CV + '%' : '—'}</span>
+                </div>
+                <div class="bg-slate-900/40 p-3 rounded-xl border border-slate-700/30">
+                    <span class="block text-[11px] text-slate-400">Aktivno vreme senzora</span>
+                    <span class="text-lg font-bold text-slate-100">${a.ACTIVE_TIME !== null ? a.ACTIVE_TIME + '%' : '—'}</span>
+                </div>
+            </div>
+        </div>
+    </div>`;
     document.getElementById("result").innerHTML = html;
-}
-function metric(label, value, unit) {
-    let display = (value === null || value === undefined) ? "—" : value + " " + unit;
-    return "<div class='metric'><strong>" + label + "</strong><span>" + display + "</span></div>";
 }
 </script>
 </body>
@@ -909,21 +971,23 @@ DASHBOARD_HTML = """
 <html lang="sr">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dr Marko Jovanović — Live Panel</title>
-<style>
-body { background: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 25px; margin: 0; }
-.container { max-width: 1000px; margin: auto; }
-h2 { color: #38bdf8; border-bottom: 2px solid #334155; padding-bottom: 10px; }
-.report-card { background: #1e293b; padding: 20px; margin-bottom: 15px; border-radius: 10px; border: 1px solid #334155; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-.nav { margin-bottom: 20px; }
-.nav a { color: #38bdf8; text-decoration: none; font-weight: bold; }
-</style>
+<script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-<div class="container">
-<div class="nav"><a href="/">← Nazad na Upload</a></div>
-<h2>Dr Marko Jovanović — Live Panel</h2>
-<div id="c">Učitavanje izveštaja iz baze...</div>
+<body class="bg-slate-900 text-slate-100 min-h-screen py-10 px-4 flex flex-col items-center">
+<div class="w-full max-w-4xl">
+    <header class="flex justify-between items-center mb-8 bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+        <div>
+            <h1 class="text-xl font-bold text-teal-400">Dr Marko Jovanović — Live Panel</h1>
+            <p class="text-slate-400 text-sm mt-1">Pregled sačuvanih CGM izveštaja iz baze podataka.</p>
+        </div>
+        <a href="/" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition">← Nazad na Upload</a>
+    </header>
+
+    <div id="c" class="space-y-4">
+        <div class="bg-slate-800 p-6 rounded-2xl text-center text-slate-400">Učitavanje izveštaja iz baze...</div>
+    </div>
 </div>
 <script>
 async function loadReports() {
@@ -931,26 +995,48 @@ async function loadReports() {
         const res = await fetch('/api/reports');
         const data = await res.json();
         if(!data.length) {
-            document.getElementById('c').innerHTML = "<p>Nema sačuvanih izveštaja u bazi.</p>";
+            document.getElementById('c').innerHTML = `<div class="bg-slate-800 border border-slate-700 p-8 rounded-2xl text-center text-slate-400">Nema sačuvanih izveštaja u bazi.</div>`;
             return;
         }
         document.getElementById('c').innerHTML = data.map(r => `
-            <div class="report-card">
-                <strong>Pacijent: ${r.patient_id}</strong> — <span style="color:#38bdf8;">${r.device_name || 'CGM'} (${r.manufacturer || ''})</span><br><br>
-                TIR: <span style="color:#4ade80; font-size:20px; font-weight:bold;">${r.tir !== null ? r.tir + '%' : '-'}</span> | 
-                TBR: <span style="color:#f87171; font-weight:bold;">${r.tbr !== null ? r.tbr + '%' : '-'}</span> | 
-                TAR: <span style="color:#fbbf24; font-weight:bold;">${r.tar !== null ? r.tar + '%' : '-'}</span> | 
-                GMI: ${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'} | 
-                CV: ${r.cv !== null ? r.cv + '%' : '-'} | 
-                Aktivno: ${r.active_time || '-'}
+            <div class="bg-slate-800 border border-slate-700 p-6 rounded-2xl shadow-xl space-y-4">
+                <div class="flex justify-between items-center border-b border-slate-700 pb-3">
+                    <span class="font-bold text-slate-200">Pacijent: ${r.patient_id}</span>
+                    <span class="text-xs bg-teal-900/60 text-teal-300 border border-teal-700 px-3 py-1 rounded-full font-semibold">${r.device_name || 'CGM Report'}</span>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-6 gap-3 text-center">
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">TIR</span>
+                        <span class="text-lg font-bold text-emerald-400">${r.tir !== null ? r.tir + '%' : '-'}</span>
+                    </div>
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">TBR</span>
+                        <span class="text-lg font-bold text-rose-400">${r.tbr !== null ? r.tbr + '%' : '-'}</span>
+                    </div>
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">TAR</span>
+                        <span class="text-lg font-bold text-amber-400">${r.tar !== null ? r.tar + '%' : '-'}</span>
+                    </div>
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">GMI</span>
+                        <span class="text-lg font-bold text-slate-200">${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'}</span>
+                    </div>
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">CV</span>
+                        <span class="text-lg font-bold text-slate-200">${r.cv !== null ? r.cv + '%' : '-'}</span>
+                    </div>
+                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold">Aktivno</span>
+                        <span class="text-lg font-bold text-slate-200">${r.active_time || '-'}</span>
+                    </div>
+                </div>
             </div>
         `).join('');
     } catch(err) {
-        document.getElementById('c').innerHTML = "<p style='color:#f87171;'>Greška pri učitavanju sa servera.</p>";
+        document.getElementById('c').innerHTML = `<div class="bg-rose-900/50 border border-rose-700 p-6 rounded-2xl text-center text-rose-200">Greška pri učitavanju sa servera.</div>`;
     }
 }
 loadReports();
-setInterval(loadReports, 5000);
 </script>
 </body>
 </html>
