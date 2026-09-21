@@ -8,134 +8,18 @@ from typing import Optional, Dict, List, Any, Tuple
 # ============================================================
 
 Metrics = {
-
-    "VERY_LOW": {
-        "aliases": [
-            "very low",
-            "very-low",
-            "vrlo nisko",
-            "веома ниско",
-            "veoma nizak nivo"
-        ],
-        "unit": "%",
-        "type": "RANGE_COMPONENT"
-    },
-
-    "LOW": {
-        "aliases": [
-            "low",
-            "tbr",
-            "below range",
-            "nisko",
-            "ниско",
-            "nizak nivo"
-        ],
-        "unit": "%",
-        "type": "RANGE_COMPONENT"
-    },
-
-    "IN_RANGE": {
-        "aliases": [
-            "in range",
-            "in-range",
-            "time in range",
-            "normal",
-            "tir",
-            "u opsegu",
-            "у опсегу",
-            "normalno",
-            "нормално"
-        ],
-        "unit": "%",
-        "type": "RANGE_COMPONENT"
-    },
-
-    "HIGH": {
-        "aliases": [
-            "high",
-            "tar",
-            "above range",
-            "visoko",
-            "високо"
-        ],
-        "unit": "%",
-        "type": "RANGE_COMPONENT"
-    },
-
-    "VERY_HIGH": {
-        "aliases": [
-            "very high",
-            "very-high",
-            "vrlo visoko",
-            "веома високо",
-            "veoma visoko"
-        ],
-        "unit": "%",
-        "type": "RANGE_COMPONENT"
-    },
-
-    "GMI": {
-        "aliases": [
-            "glucose management indicator",
-            "gmi",
-            "indikator upravljanja glukozom",
-            "индикатор управљања глукозом"
-        ],
-        "unit": "%",
-        "type": "METRIC"
-    },
-
-    "CV": {
-        "aliases": [
-            "glucose variability",
-            "coefficient of variation",
-            "percent coefficient of variation",
-            "gv (cvs)",
-            "gv (cv)",
-            "gv",
-            "cv",
-            "varijabilnost",
-            "варијабилност",
-            "varijabilnost glukoze",
-            "варијабилност глукозе",
-            "koeficijent varijacije"
-        ],
-        "unit": "%",
-        "type": "METRIC"
-    },
-
-    "ACTIVE_TIME": {
-        "aliases": [
-            "time cgm active",
-            "time cgM active",
-            "cgm active",
-            "active time",
-            "sensor active",
-            "cgm coverage time",
-            "coverage time",
-            "aktivno vreme cgm",
-            "aktivno vreme",
-            "активно време"
-        ],
-        "unit": "%",
-        "type": "METRIC"
-    },
-
-    "AVG_GLUCOSE": {
-        "aliases": [
-            "average glucose",
-            "mean glucose",
-            "mbg",
-            "mean blood glucose",
-            "prosečna vrednost glukoze",
-            "просечна вредност глукозе",
-            "prosečna glukoza",
-            "просечна глукоза"
-        ],
-        "unit": "GLUCOSE",
-        "type": "METRIC"
-    }
+    "VERY_LOW": {"aliases": ["very low", "very-low", "vrlo nisko", "веома ниско", "veoma nizak nivo"], "unit": "%", "type": "RANGE_COMPONENT"},
+    "LOW": {"aliases": ["low", "tbr", "below range", "nisko", "ниско", "nizak nivo"], "unit": "%", "type": "RANGE_COMPONENT"},
+    "IN_RANGE": {"aliases": ["in range", "in-range", "time in range", "normal", "tir", "u opsegu", "у опсегу", "normalno", "нормално"], "unit": "%", "type": "RANGE_COMPONENT"},
+    "HIGH": {"aliases": ["high", "tar", "above range", "visoko", "високо", "visok nivo"], "unit": "%", "type": "RANGE_COMPONENT"},
+    "VERY_HIGH": {"aliases": ["very high", "very-high", "vrlo visoko", "веома високо", "veoma visoko", "veoma visok nivo"], "unit": "%", "type": "RANGE_COMPONENT"},
+    "GMI": {"aliases": ["glucose management indicator", "gmi", "indikator upravljanja glukozom", "индикатор управљања глукозом"], "unit": "%", "type": "METRIC"},
+    "CV": {"aliases": ["glucose variability", "coefficient of variation", "percent coefficient of variation", "gv (cvs)", "gv (cv)", "gv", "cv", "varijabilnost", "варијабилност", "varijabilnost glukoze", "варијабилност глукозе", "koeficijent varijacije"], "unit": "%", "type": "METRIC"},
+    "ACTIVE_TIME": {"aliases": ["time cgm active", "time cgM active", "cgm active", "active time", "sensor active", "cgm coverage time", "coverage time", "aktivno vreme cgm", "aktivno vreme", "активно време"], "unit": "%", "type": "METRIC"},
+    "AVG_GLUCOSE": {"aliases": ["average glucose", "mean glucose", "mbg", "mean blood glucose", "prosečna vrednost glukoze", "просечна вредност глукозе", "prosečna glukoza", "просечна глукоза"], "unit": "GLUCOSE", "type": "METRIC"}
 }
+
+
 
 
 # ============================================================
@@ -635,53 +519,32 @@ class UniversalCGMParser:
 
         return result
 
-    def _pair_standard_metrics(self):
+        def _pair_standard_metrics(self):
         target_metrics = ["GMI", "CV", "ACTIVE_TIME", "AVG_GLUCOSE"]
         result = {metric: None for metric in target_metrics}
-
         for metric in target_metrics:
             anchors = [a for a in self.anchors if a["metric"] == metric]
-            if not anchors:
-                continue
-
-            best_pair = None
-            best_score = float("inf")
-
-            for anchor in anchors:
-                for candidate in self.candidates:
-                    if candidate["page"] != anchor["page"] or candidate["context_type"] == "GOAL":
-                        continue
-                    if metric == "AVG_GLUCOSE":
-                        if candidate["unit"] != "GLUCOSE":
-                            continue
-                    else:
-                        if candidate["unit"] != "%":
-                            continue
-
-                    dy = vertical_distance(anchor["bbox"], candidate["bbox"])
-                    dx = horizontal_distance(anchor["bbox"], candidate["bbox"])
-                    if dx > 350 or dy > 180:
-                        continue
-
-                    score = dy + dx * 0.15
-                    if anchor["region_id"] == candidate["region_id"]:
-                        score -= 25
-                    if anchor["line_id"] == candidate["line_id"]:
-                        score -= 60
-
-                    if score < best_score:
-                        best_score = score
-                        best_pair = (anchor, candidate)
-
-            if best_pair:
-                anchor, candidate = best_pair
-                result[metric] = candidate["value"]
-                self.associations.append({
-                    "type": "STANDARD", "metric": metric, "candidate_id": candidate["candidate_id"],
-                    "value": candidate["value"], "score": round(best_score, 2)
-                })
-
+            if not anchors: continue
+            for a in anchors:
+                valid_candidates = []
+                for c in self.candidates:
+                    if c["page"] != a["page"]: continue
+                    if metric == "AVG_GLUCOSE" and c["unit"] != "GLUCOSE": continue
+                    if metric != "AVG_GLUCOSE" and c["unit"] != "%": continue
+                    
+                    vd = vertical_distance(a["bbox"], c["bbox"])
+                    if vd <= 180:
+                        # Čuvamo kandidate zajedno sa njihovom vertikalnom udaljenošću
+                        valid_candidates.append((vd, c))
+                
+                if valid_candidates:
+                    # Sortiramo tako da se prvo izabere onaj procenat koji je savršeno poravnat sa tekstom
+                    valid_candidates.sort(key=lambda x: x[0])
+                    result[metric] = valid_candidates[0][1]["value"]
+                    break
+            if metric in result: break
         return result
+
 
     def _derive_metrics(self, actual: Dict[str, Any]):
         very_low = actual.get("VERY_LOW")
