@@ -3,8 +3,17 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
+def safe_float(val_str: str) -> Optional[float]:
+    if not val_str: return None
+    # Uklanjamo operatore (<, >) da bismo dobili čist broj
+    clean = re.sub(r"[<>≤≥\s]", "", val_str).replace(",", ".")
+    try:
+        return float(clean)
+    except:
+        return None
+
 def parse_date_flexible(date_str: str) -> Optional[str]:
-    # Normalizacija na engleski za lakše parsiranje formata
+    # Normalizacija na engleski za lakše parsiranje
     srb_to_eng = {
         "јан": "Jan", "feb": "Feb", "мар": "Mar", "апр": "Apr", "мај": "May", "јун": "Jun",
         "јул": "Jul", "авг": "Aug", "сеп": "Sep", "окт": "Oct", "нов": "Nov", "дец": "Dec",
@@ -26,12 +35,7 @@ def parse_date_flexible(date_str: str) -> Optional[str]:
             continue
     return date_str
 
-
 class UniversalCGMParser:
-    """
-    Novi, drastično uprošćeni parser (Clean Slate arhitektura).
-    Čita PDF vizuelno, liniju po liniju, i koristi direktan regex bez merenja piksela.
-    """
     
     def parse(self, pdf_bytes: bytes) -> Dict[str, Any]:
         lines = self._extract_lines_from_pdf(pdf_bytes)
@@ -42,56 +46,53 @@ class UniversalCGMParser:
         }
 
         for line in lines:
-            # Preskačemo opise, ciljeve i uputstva (nema lažnih mešanja brojeva)
-            if any(ignore in line for ignore in ["target", "cilj", "each 5%", "svako povecanje", "свако повећање", "goal", "1% of time"]):
+            # 1. Preskačemo informativne linije i datume štampanja (sprečava greške u podacima)
+            if any(ignore in line for ignore in ["target", "cilj", "each 5%", "svako povecanje", "свако повећање", "goal", "1% of time", "print", "štamp", "stamp", "generisano"]):
                 continue
 
-            # 1. OPSEZI (mySugr uvek stavlja procenat ISPED reči, npr. "6% Low")
-            if any(w in line for w in ["very high", "веома високо", "veoma visoko", "veoma visok", "vrlo visoko"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:very high|веома високо|veoma visoko|veoma visok|vrlo visoko)", line)
-                if m: actuals["VERY_HIGH"] = float(m.group(1))
-                continue
+            # ==========================================
+            # OPSEZI (Striktno gleda broj TIK ISPRED naziva, dozvoljava < i >)
+            # ==========================================
+            if actuals["VERY_HIGH"] is None and any(w in line for w in ["very high", "веома високо", "veoma visoko", "veoma visok", "vrlo visoko"]):
+                m = re.search(r"([<>]?\s*\d+(?:\.\d+)?)\s*%\s*(?:very high|веома високо|veoma visoko|veoma visok|vrlo visoko)", line)
+                if m: actuals["VERY_HIGH"] = safe_float(m.group(1))
                 
-            if any(w in line for w in ["high", "високо", "visoko", "visok"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:high|високо|visoko|visok)", line)
-                if m: actuals["HIGH"] = float(m.group(1))
-                continue
+            if actuals["HIGH"] is None and any(w in line for w in ["high", "високо", "visoko", "visok"]):
+                # Negativni lookbehind sprečava da pomeša HIGH sa VERY HIGH
+                m = re.search(r"([<>]?\s*\d+(?:\.\d+)?)\s*%\s*(?<!very )(?<!veoma )(?<!веома )(?<!vrlo )(?:high|високо|visoko|visok)", line)
+                if m: actuals["HIGH"] = safe_float(m.group(1))
 
-            if any(w in line for w in ["very low", "vrlo nisko", "веома ниско", "veoma nizak", "veoma nisko"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:very low|vrlo nisko|веома ниско|veoma nizak|veoma nisko)", line)
-                if m: actuals["VERY_LOW"] = float(m.group(1))
-                continue
+            if actuals["VERY_LOW"] is None and any(w in line for w in ["very low", "vrlo nisko", "веома ниско", "veoma nizak", "veoma nisko"]):
+                m = re.search(r"([<>]?\s*\d+(?:\.\d+)?)\s*%\s*(?:very low|vrlo nisko|веома ниско|veoma nizak|veoma nisko)", line)
+                if m: actuals["VERY_LOW"] = safe_float(m.group(1))
 
-            if any(w in line for w in ["low", "nisko", "ниско", "nizak"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:low|nisko|ниско|nizak)", line)
-                if m: actuals["LOW"] = float(m.group(1))
-                continue
+            if actuals["LOW"] is None and any(w in line for w in ["low", "nisko", "ниско", "nizak"]):
+                m = re.search(r"([<>]?\s*\d+(?:\.\d+)?)\s*%\s*(?<!very )(?<!veoma )(?<!веома )(?<!vrlo )(?:low|nisko|ниско|nizak)", line)
+                if m: actuals["LOW"] = safe_float(m.group(1))
 
-            if any(w in line for w in ["in range", "u opsegu", "у опсегу", "normalno"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу|normalno)", line)
-                if m: actuals["IN_RANGE"] = float(m.group(1))
-                continue
+            if actuals["IN_RANGE"] is None and any(w in line for w in ["in range", "u opsegu", "у опсегу", "normalno"]):
+                m = re.search(r"([<>]?\s*\d+(?:\.\d+)?)\s*%\s*(?:in range|u opsegu|у опсегу|normalno)", line)
+                if m: actuals["IN_RANGE"] = safe_float(m.group(1))
 
-            # 2. STANDARDI (Traži prvi procenat u liniji gde je prepoznat ključni pojam)
-            if any(w in line for w in ["gmi", "glucose management indicator", "indikator upravljanja"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
-                if m: actuals["GMI"] = float(m.group(1))
-                continue
+            # ==========================================
+            # STANDARDNE METRIKE
+            # (Uzimamo UVEK poslednji broj u redu da izbegnemo ciljeve poput "Target < 36%")
+            # ==========================================
+            if actuals["GMI"] is None and any(w in line for w in ["gmi", "glucose management", "indikator upravljanja"]):
+                matches = re.findall(r"([<>]?\s*\d+(?:\.\d+)?)\s*%", line)
+                if matches: actuals["GMI"] = safe_float(matches[-1])
 
-            if any(w in line for w in ["cv", "varijabilnost", "coefficient of variation"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
-                if m: actuals["CV"] = float(m.group(1))
-                continue
+            if actuals["CV"] is None and any(w in line for w in ["cv", "varijabilnost", "variability", "coefficient", "koeficijent", "gv"]):
+                matches = re.findall(r"([<>]?\s*\d+(?:\.\d+)?)\s*%", line)
+                if matches: actuals["CV"] = safe_float(matches[-1])
 
-            if any(w in line for w in ["active time", "aktivno vreme", "sensor active", "cgm active", "coverage"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
-                if m: actuals["ACTIVE_TIME"] = float(m.group(1))
-                continue
+            if actuals["ACTIVE_TIME"] is None and any(w in line for w in ["active time", "aktivno vreme", "sensor active", "cgm active", "coverage", "time cgm"]):
+                matches = re.findall(r"([<>]?\s*\d+(?:\.\d+)?)\s*%", line)
+                if matches: actuals["ACTIVE_TIME"] = safe_float(matches[-1])
 
-            if any(w in line for w in ["average glucose", "prosečna", "mean glucose", "mbg", "просечна"]):
-                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:mmol/l|mg/dl)", line)
-                if m: actuals["AVG_GLUCOSE"] = float(m.group(1))
-                continue
+            if actuals["AVG_GLUCOSE"] is None and any(w in line for w in ["average glucose", "prosečna", "mean glucose", "mbg", "просечна"]):
+                matches = re.findall(r"([<>]?\s*\d+(?:\.\d+)?)\s*(?:mmol/l|mg/dl)", line)
+                if matches: actuals["AVG_GLUCOSE"] = safe_float(matches[-1])
 
         derived = self._derive_metrics(actuals)
         period = self._extract_period(lines)
@@ -107,7 +108,6 @@ class UniversalCGMParser:
         }
 
     def _extract_lines_from_pdf(self, pdf_bytes: bytes) -> List[str]:
-        """Grupisanje reči u precizne vizuelne redove na stranici."""
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
@@ -116,18 +116,19 @@ class UniversalCGMParser:
         lines = []
         for page in doc:
             words = page.get_text("words")
-            # Sortiranje prvo po Y osi (visini), pa po X osi (širini)
+            # Prvo sortiramo po visini, pa po horizontali
             words.sort(key=lambda w: (w[1], w[0]))
             
             current_line = []
             current_y = None
             
+            # Povećana tolerancija na 12px da bez greške spoji CV i procente u isti red
             for w in words:
                 y_center = (w[1] + w[3]) / 2
                 if current_y is None:
                     current_line.append(w)
                     current_y = y_center
-                elif abs(y_center - current_y) < 5.0:  # Spajamo reči u istom redu
+                elif abs(y_center - current_y) < 12.0:  
                     current_line.append(w)
                     current_y = sum((x[1] + x[3]) / 2 for x in current_line) / len(current_line)
                 else:
@@ -155,7 +156,9 @@ class UniversalCGMParser:
         return {"TBR": tbr, "TIR": tir, "TAR": tar}
 
     def _extract_period(self, lines: List[str]) -> Dict[str, Any]:
-        text = " ".join(lines)
+        # Čistimo datume kada je PDF samo odštampan/generisan
+        safe_lines = [l for l in lines if not any(x in l for x in ["print", "štamp", "stamp", "generisano"])]
+        text = " ".join(safe_lines)
         months = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|maj|avg|okt|јан|феб|мар|апр|мај|јун|јул|авг|сеп|окт|нов|дец"
         matches = re.findall(rf"(\d{{1,2}}\s+(?:{months})\.?\s+\d{{4}})", text, re.IGNORECASE)
         
