@@ -50,17 +50,21 @@ async def upload_pdf(
     actuals = report["actual_components"]
     derived = report["derived_metrics"]
 
-    parsed_data = {
-        "patient_id": "P-000127",
-        "device_name": device.upper(),
-        "manufacturer": "Universal / " + device.capitalize(),
-        "tir": derived.get("TIR"),
-        "tbr": derived.get("TBR"),
-        "tar": derived.get("TAR"),
-        "gmi_percent": actuals.get("GMI"),
-        "cv": actuals.get("CV"),
-        "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
-    }
+    reporting_period = report.get("reporting_period", {})
+parsed_data = {
+    "patient_id": "P-000127",
+    "device_name": device.upper(),
+    "manufacturer": "Universal / " + device.capitalize(),
+    "reporting_period_start": reporting_period.get("start"),
+    "reporting_period_end": reporting_period.get("end"),
+    "tir": derived.get("TIR"),
+    "tbr": derived.get("TBR"),
+    "tar": derived.get("TAR"),
+    "gmi_percent": actuals.get("GMI"),
+    "cv": actuals.get("CV"),
+    "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
+}
+
 
     try:
         save_report_to_db(parsed_data)
