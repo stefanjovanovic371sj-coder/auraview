@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
 
-class MySugrAGPParser:
+class UniversalCGMParser:
     """
     Robust parser za mySugr / Accu-Chek AGP izveštaje.
 
@@ -547,16 +547,9 @@ class MySugrAGPParser:
                         dict.fromkeys(candidates)
                     )
 
-                    if len(candidates) == 1:
+                    if len(candidates) >= 1:
 
                         result[key] = candidates[0]
-
-                    elif len(candidates) > 1:
-
-                        warnings.append(
-                            f"{key}: više mogućih vrednosti "
-                            f"u lokalnom kontekstu."
-                        )
 
         return result, warnings
 
@@ -724,18 +717,12 @@ class MySugrAGPParser:
             if value not in unique_values:
                 unique_values.append(value)
 
-        if len(unique_values) == 1:
+        if len(unique_values) >= 1:
             return unique_values[0], None
-
-        if len(unique_values) == 0:
-            return (
-                None,
-                f"{key}: naziv pronađen, ali vrednost nije pouzdano pronađena."
-            )
 
         return (
             None,
-            f"{key}: pronađeno više mogućih vrednosti {unique_values}."
+            f"{key}: naziv pronađen, ali vrednost nije pouzdano pronađena."
         )
 
     # =========================================================
@@ -814,18 +801,12 @@ class MySugrAGPParser:
             dict.fromkeys(candidates)
         )
 
-        if len(candidates) == 1:
+        if len(candidates) >= 1:
             return candidates[0], None
-
-        if len(candidates) == 0:
-            return (
-                None,
-                "AVG_GLUCOSE: vrednost nije pouzdano pronađena."
-            )
 
         return (
             None,
-            f"AVG_GLUCOSE: više mogućih vrednosti {candidates}."
+            "AVG_GLUCOSE: vrednost nije pouzdano pronađena."
         )
 
     # =========================================================
@@ -1369,7 +1350,7 @@ class MySugrAGPParser:
 if __name__ == "__main__":
 
     print(
-        "MySugrAGPParser je spreman."
+        "UniversalCGMParser je spreman."
     )
 
     print(
@@ -1377,7 +1358,7 @@ if __name__ == "__main__":
     )
 
     print(
-        "parser = MySugrAGPParser()"
+        "parser = UniversalCGMParser()"
     )
 
     print(
