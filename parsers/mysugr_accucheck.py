@@ -454,6 +454,7 @@ class UniversalCGMParser:
 
                             break
 
+        # Fallback za VERY_HIGH ako stoji npr "0% very high" ili na liniji pre
         missing_keys = [
             key
             for key, value in result.items()
@@ -535,6 +536,7 @@ class UniversalCGMParser:
 
         warnings = []
 
+        # 1. GMI
         result["GMI"], warning = self._extract_metric_after_label(
             lines,
             labels=[
@@ -545,49 +547,47 @@ class UniversalCGMParser:
             unit="percent",
             key="GMI"
         )
-
         if warning:
             warnings.append(warning)
 
+        # 2. CV
         result["CV"], warning = self._extract_metric_after_label(
             lines,
             labels=[
                 "glucose variability",
                 "coefficient of variation",
-                "variability",
                 "varijabilnost",
                 "koeficijent varijacije",
+                "variability",
                 "cv"
             ],
             unit="percent",
             key="CV"
         )
-
         if warning:
             warnings.append(warning)
 
+        # 3. ACTIVE TIME (Najspecifičniji termini idu prvi)
         result["ACTIVE_TIME"], warning = self._extract_metric_after_label(
             lines,
             labels=[
                 "time cgm active",
-                "time cgm",
-                "cgm active",
                 "time sensor active",
                 "sensor active",
+                "cgm active",
                 "active time",
                 "aktivno vreme"
             ],
             unit="percent",
             key="ACTIVE_TIME"
         )
-
         if warning:
             warnings.append(warning)
 
+        # 4. AVG GLUCOSE
         result["AVG_GLUCOSE"], warning = self._extract_average_glucose(
             lines
         )
-
         if warning:
             warnings.append(warning)
 
@@ -628,6 +628,7 @@ class UniversalCGMParser:
 
         for index in label_indices:
 
+            # Gledamo liniju sa nazivom i do 4 linije ispod
             nearby = lines[
                 index:
                 min(len(lines), index + 5)
@@ -638,8 +639,16 @@ class UniversalCGMParser:
                 if self._is_goal_line(line):
                     continue
 
-                # Ignorišemo linije opsega kako ne bi povukao npr. "92% in range" ili "1% high"
-                if any(x in line for x in ["in range", "u opsegu", "very high", "very low", "low", "high", "nisko", "visoko"]):
+                # Ignorišemo linije koje pripadaju opsezima
+                if any(x in line for x in ["in range", "u opsegu", "very high", "very low", "nisko", "visoko"]):
+                    continue
+
+                # Posebno za ACTIVE_TIME: ignorišemo linije koje sadrže 'gmi' ili 'average'
+                if key == "ACTIVE_TIME" and any(x in line for x in ["gmi", "average glucose", "prosečna"]):
+                    continue
+
+                # Posebno za CV: ignorišemo linije koje sadrže 'gmi'
+                if key == "CV" and "gmi" in line:
                     continue
 
                 if unit == "percent":
