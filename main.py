@@ -1,30 +1,18 @@
 import sys
 import os
 
-# Osiguravamo da Python uvek vidi glavni folder i podfoldere
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-# Ponovo importujemo iz parsers foldera
 from parsers.factory import get_parser_for_device, ParserNotImplementedError
 from database import save_report_to_db, fetch_reports_from_db
 
 app = FastAPI(title="Modular CGM AGP Platform", version="3.6.0")
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-
-
-app = FastAPI(title="Modular CGM AGP Platform", version="3.3.2")
-# ... ostatak tvog koda ...
-
-
-app = FastAPI(title="Modular CGM AGP Platform", version="3.2.0")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -60,21 +48,30 @@ async def upload_pdf(
         "active_time": str(actuals.get("ACTIVE_TIME")) + "%" if actuals.get("ACTIVE_TIME") is not None else None,
     }
 
-    save_report_to_db(parsed_data)
+    try:
+        save_report_to_db(parsed_data)
+    except Exception as e:
+        print(f"Greška pri upisu u bazu: {e}")
 
     return {"status": report["status"], "data": parsed_data, "report": report}
 
 @app.get("/api/reports")
 def get_reports():
-    return fetch_reports_from_db()
+    try:
+        return fetch_reports_from_db()
+    except Exception as e:
+        print(f"Greška pri čitanju iz baze: {e}")
+        return []
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse(request, "index.html", {})
+    return templates.TemplateResponse("index.html", {"request": request})
 
+# Podržavamo i /dashboard i /doctor da dugme sigurno pogodi rutu
 @app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/doctor", response_class=HTMLResponse)
 async def doctor_dashboard(request: Request):
-    return templates.TemplateResponse(request, "dashboard.html", {})
+    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 if __name__ == "__main__":
     import uvicorn
