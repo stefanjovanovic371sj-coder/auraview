@@ -1,51 +1,146 @@
 <!DOCTYPE html>
 <html lang="sr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dr Marko Jovanović — Live Panel</title>
-<script src="https://cdn.tailwindcss.com"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dr Marko Jovanović — Live Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Sakriva scrollbar ali omogucava scroll */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen py-10 px-4 flex flex-col items-center">
 <div class="w-full max-w-4xl">
+    
+    <!-- HEADER -->
     <header class="flex justify-between items-center mb-8 bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
         <div>
             <h1 class="text-xl font-bold text-teal-400">Dr Marko Jovanović — Live Panel</h1>
-            <p class="text-slate-400 text-sm mt-1">Pregled sačuvanih CGM izveštaja iz baze podataka.</p>
+            <p class="text-slate-400 text-sm mt-1">Hronološki pregled pacijenata sa trendom terapije</p>
         </div>
         <a href="/" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition">← Nazad na Upload</a>
     </header>
-    <div id="c" class="space-y-4">
-        <div class="bg-slate-800 p-6 rounded-2xl text-center text-slate-400">Učitavanje izveštaja iz baze...</div>
+
+    <!-- LISTA KARTICA -->
+    <div id="c" class="space-y-6">
+        <div class="bg-slate-800 p-6 rounded-2xl text-center text-slate-400 animate-pulse">Učitavanje izveštaja i kalkulacija trendova...</div>
     </div>
+
 </div>
+
 <script>
+// Funkcija za prelep format datuma (npr. "26. Sep 2026.")
+function formatDate(dateString) {
+    if (!dateString) return 'Nepoznat datum';
+    const d = new Date(dateString);
+    return d.toLocaleDateString('sr-RS', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// Funkcija za formatiranje strelica trenda
+function getTrend(current, previous, isPositiveGood) {
+    if (current === null || previous === null || current === undefined || previous === undefined) return '';
+    const diff = (current - previous).toFixed(1);
+    if (diff == 0) return `<span class="text-[10px] text-slate-500 ml-1">(=)</span>`;
+    
+    // Da li je rast vrednosti dobra stvar? (TIR = true, TBR/GMI = false)
+    const isGood = diff > 0 ? isPositiveGood : !isPositiveGood;
+    const colorClass = isGood ? 'text-emerald-400' : 'text-rose-400';
+    const arrow = diff > 0 ? '↑' : '↓';
+    const sign = diff > 0 ? '+' : '';
+    
+    return `<span class="text-[11px] font-bold ml-1 ${colorClass}">${arrow} ${Math.abs(diff)}%</span>`;
+}
+
 async function loadReports() {
     try {
         const res = await fetch('/api/reports');
         const data = await res.json();
-        if(!data.length) {
+        
+        if(!data || !data.length) {
             document.getElementById('c').innerHTML = `<div class="bg-slate-800 border border-slate-700 p-8 rounded-2xl text-center text-slate-400">Nema sačuvanih izveštaja u bazi.</div>`;
             return;
         }
-        document.getElementById('c').innerHTML = data.map(r => `
-            <div class="bg-slate-800 border border-slate-700 p-6 rounded-2xl shadow-xl space-y-4">
-                <div class="flex justify-between items-center border-b border-slate-700 pb-3">
-                    <span class="font-bold text-slate-200">Pacijent: ${r.patient_id}</span>
-                    <span class="text-xs bg-teal-900/60 text-teal-300 border border-teal-700 px-3 py-1 rounded-full font-semibold">${r.device_name || 'CGM Report'}</span>
+
+        document.getElementById('c').innerHTML = data.map((r, index) => {
+            // Logika: Nalazimo istorijski prethodni izvestaj (sledeci u nizu, jer je niz sortiran od najnovijeg)
+            const prev = data[index + 1] || {}; 
+            
+            const periodText = (r.reporting_period_start && r.reporting_period_end) 
+                ? `${formatDate(r.reporting_period_start)} – ${formatDate(r.reporting_period_end)}`
+                : 'Pojedinačan izveštaj';
+
+            return `
+            <div class="bg-slate-800 border border-slate-700 p-6 rounded-2xl shadow-xl space-y-4 relative overflow-hidden">
+                
+                <!-- Indikator hronologije (najnoviji) -->
+                ${index === 0 ? '<div class="absolute top-0 right-0 bg-teal-500 text-slate-900 text-[10px] font-bold px-3 py-1 rounded-bl-lg uppercase tracking-wider">Najnovije</div>' : ''}
+
+                <div class="flex justify-between items-end border-b border-slate-700/60 pb-3">
+                    <div>
+                        <span class="block text-xl font-bold text-slate-200">${r.patient_id || 'Nepoznat Pacijent'}</span>
+                        <span class="block text-sm text-slate-400 mt-0.5"><span class="text-slate-500">Period:</span> ${periodText}</span>
+                    </div>
+                    <span class="text-xs bg-slate-700/50 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg font-medium">${r.device_name || 'CGM Uređaj'}</span>
                 </div>
-                <div class="grid grid-cols-2 sm:grid-cols-6 gap-3 text-center">
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">TIR</span><span class="text-lg font-bold text-emerald-400">${r.tir !== null ? r.tir + '%' : '-'}</span></div>
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">TBR</span><span class="text-lg font-bold text-rose-400">${r.tbr !== null ? r.tbr + '%' : '-'}</span></div>
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">TAR</span><span class="text-lg font-bold text-amber-400">${r.tar !== null ? r.tar + '%' : '-'}</span></div>
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">GMI</span><span class="text-lg font-bold text-slate-200">${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'}</span></div>
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">CV</span><span class="text-lg font-bold text-slate-200">${r.cv !== null ? r.cv + '%' : '-'}</span></div>
-                    <div class="bg-slate-900/50 p-3 rounded-xl border border-slate-700/40"><span class="block text-[10px] text-slate-400 uppercase font-semibold">Aktivno</span><span class="text-lg font-bold text-slate-200">${r.active_time || '-'}</span></div>
+                
+                <div class="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
+                    
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">TIR (Cilj)</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-emerald-400">${r.tir !== null ? r.tir + '%' : '-'}</span>
+                        </div>
+                        ${getTrend(r.tir, prev.tir, true)} <!-- TIR: rast je dobar (true) -->
+                    </div>
+
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">TBR (Hipo)</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-rose-400">${r.tbr !== null ? r.tbr + '%' : '-'}</span>
+                        </div>
+                        ${getTrend(r.tbr, prev.tbr, false)} <!-- TBR: pad je dobar (false) -->
+                    </div>
+
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">TAR (Hiper)</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-amber-400">${r.tar !== null ? r.tar + '%' : '-'}</span>
+                        </div>
+                        ${getTrend(r.tar, prev.tar, false)}
+                    </div>
+
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">GMI</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-slate-200">${r.gmi_percent !== null ? r.gmi_percent + '%' : '-'}</span>
+                        </div>
+                        ${getTrend(r.gmi_percent, prev.gmi_percent, false)}
+                    </div>
+
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">CV (Var.)</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-slate-200">${r.cv !== null ? r.cv + '%' : '-'}</span>
+                        </div>
+                        ${getTrend(r.cv, prev.cv, false)}
+                    </div>
+
+                    <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-700/50 flex flex-col items-center justify-center">
+                        <span class="block text-[10px] text-slate-400 uppercase font-semibold mb-1">Aktivno</span>
+                        <div class="flex items-baseline">
+                            <span class="text-xl font-bold text-slate-400">${r.active_time || '-'}</span>
+                        </div>
+                        <span class="text-[10px] text-transparent select-none">-</span> <!-- Prazan prostor za poravnanje -->
+                    </div>
                 </div>
             </div>
-        `).join('');
+            `;
+        }).join('');
     } catch(err) {
         document.getElementById('c').innerHTML = `<div class="bg-rose-900/50 border border-rose-700 p-6 rounded-2xl text-center text-rose-200">Greška pri učitavanju sa servera.</div>`;
+        console.error(err);
     }
 }
 loadReports();
