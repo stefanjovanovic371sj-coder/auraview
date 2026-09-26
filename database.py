@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 
 SUPABASE_URL = "https://tuhgurlibsaqqxrmhgdr.supabase.co"
 SUPABASE_KEY = "sb_publishable_Dgu75wMHYMifHkuVTGgmpg_-czgDx39"
+
 SUPABASE_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -11,6 +12,7 @@ SUPABASE_HEADERS = {
 }
 
 def save_report_to_db(report_data: dict) -> bool:
+    """Upisuje obradjeni CGM izvestaj u bazu podataka."""
     try:
         response = requests.post(
             f"{SUPABASE_URL}/rest/v1/cgm_reports", 
@@ -26,13 +28,19 @@ def save_report_to_db(report_data: dict) -> bool:
         return False
 
 def fetch_reports_from_db() -> List[Dict[str, Any]]:
+    """Dohvata izvestaje hronoloski sortirane za timeline prikaz."""
     try:
+        # Primarno sortira po kraju medicinskog perioda (najnoviji prvi), sekundarno po vremenu upisa
+        url = f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=reporting_period_end.desc.nullslast,created_at.desc"
         res = requests.get(
-            f"{SUPABASE_URL}/rest/v1/cgm_reports?select=*&order=id.desc", 
+            url, 
             headers=SUPABASE_HEADERS, 
             timeout=10
         )
-        return res.json()
+        if res.status_code == 200:
+            return res.json()
+        print(f"GRESKA REST API ({res.status_code}):", res.text)
+        return []
     except Exception as e:
         print("GRESKA PRI CITANJU IZ BAZE:", str(e))
         return []
