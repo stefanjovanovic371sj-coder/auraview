@@ -10,7 +10,7 @@ class UniversalCGMParser:
     """
     
     def parse(self, pdf_bytes: bytes) -> Dict[str, Any]:
-        # 1. Pretvaramo ceo PDF u jedan dugačak string teksta
+        # Čita PDF tako da vizuelno rekonsturiše redove (sprečava lomljenje kolona)
         raw_text = self._extract_clean_text(pdf_bytes)
         
         actuals = {
@@ -41,20 +41,19 @@ class UniversalCGMParser:
 
         # ==========================================
         # METRIKE (Procenat/Vrednost stoji IZA naziva, npr: "CV 21.2%")
-        # Koristimo .*? da dozvolimo mali razmak između naziva i broja
+        # Koristimo .{0,60}? da bi tražio strogo u blizini reči, a ne na drugom kraju strane
         # ==========================================
         
-        m = re.search(r"(?:gmi|glucose management indicator|indikator upravljanja).*?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
+        m = re.search(r"(?:gmi|glucose management indicator|indikator upravljanja).{0,60}?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
         if m: actuals["GMI"] = self._to_float(m.group(1))
 
-        m = re.search(r"(?:cv|varijabilnost|variability|coefficient of variation|koeficijent|gv).*?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
+        m = re.search(r"(?:cv|varijabilnost|variability|coefficient of variation|koeficijent|gv).{0,60}?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
         if m: actuals["CV"] = self._to_float(m.group(1))
 
-        m = re.search(r"(?:active time|aktivno vreme|sensor active|cgm active|time cgm|aktivno).*?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
+        m = re.search(r"(?:active time|aktivno vreme|sensor active|cgm active|time cgm|aktivno).{0,60}?([<>]?\s*\d+(?:\.\d+)?)\s*%", raw_text)
         if m: actuals["ACTIVE_TIME"] = self._to_float(m.group(1))
 
-        # Za glukozu tražimo mmol/L ili mg/dL
-        m = re.search(r"(?:average glucose|prosečna glukoza|mean glucose|mbg|просечна глукоза|просечна вредност).*?([<>]?\s*\d+(?:\.\d+)?)\s*(?:mmol/l|mg/dl)", raw_text)
+        m = re.search(r"(?:average glucose|prosečna glukoza|mean glucose|mbg|просечна глукоза|просечна вредност).{0,60}?([<>]?\s*\d+(?:\.\d+)?)\s*(?:mmol/l|mg/dl)", raw_text)
         if m: actuals["AVG_GLUCOSE"] = self._to_float(m.group(1))
 
 
@@ -75,25 +74,44 @@ class UniversalCGMParser:
             "review_reasons": [f"Nedostaje {r}" for r in reasons]
         }
 
-
     def _extract_clean_text(self, pdf_bytes: bytes) -> str:
-        """Čita PDF i briše ciljeve/datume štampanja da ne zbunjuju parser."""
+        """Čita PDF uz očuvanje horizontalnih redova kako bi vrednosti ostale uz svoje nazive."""
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         except Exception as e:
             raise ValueError(f"Neuspešno otvaranje PDF-a: {e}")
 
-        full_text = ""
+        lines = []
         for page in doc:
-            full_text += page.get_text("text") + " "
+            words = page.get_text("words")
+            # Sortiramo prvo po Y (visini), pa po X (širini)
+            words.sort(key=lambda w: (w[1], w[0]))
+            
+            current_line = []
+            current_y = None
+            
+            for w in words:
+                y_center = (w[1] + w[3]) / 2
+                if current_y is None:
+                    current_line.append(w)
+                    current_y = y_center
+                elif abs(y_center - current_y) < 10.0:  # Spaja reči koje su u istoj vizuelnoj liniji
+                    current_line.append(w)
+                    current_y = sum((x[1] + x[3]) / 2 for x in current_line) / len(current_line)
+                else:
+                    current_line.sort(key=lambda x: x[0])
+                    lines.append(" ".join(x[4] for x in current_line))
+                    current_line = [w]
+                    current_y = y_center
+            if current_line:
+                current_line.sort(key=lambda x: x[0])
+                lines.append(" ".join(x[4] for x in current_line))
         doc.close()
 
-        # Normalizacija: sve u mala slova, zarez u tačku, uklanjanje viška razmaka
-        text = full_text.lower().replace(",", ".")
-        text = re.sub(r"\s+", " ", text)
+        # Spajamo u jedan tekst i prebacujemo u mala slova
+        text = " ".join(lines).lower().replace(",", ".")
 
-        # HIRURŠKO BRISANJE "SMEĆA": 
-        # Brišemo rečenice koje sadrže ciljeve (npr "target range < 4%")
+        # HIRURŠKO BRISANJE "SMEĆA": Brišemo ciljeve i uputstva da ne uđu kao lažni rezultati
         text = re.sub(r"(?:target|cilj|goal|reference).*?\d+(?:\.\d+)?\s*%", "", text)
         text = re.sub(r"(?:svako povecanje|свако повећање|each 5%).*?\d+(?:\.\d+)?\s*%", "", text)
         
@@ -101,7 +119,7 @@ class UniversalCGMParser:
 
     def _to_float(self, val_str: str) -> Optional[float]:
         if not val_str: return None
-        # Brišemo <, > i praznine (npr "< 1" postaje "1.0")
+        # Brišemo <, > i praznine
         clean = re.sub(r"[<>≤≥\s]", "", val_str)
         try: return float(clean)
         except: return None
@@ -118,7 +136,6 @@ class UniversalCGMParser:
 
     def _extract_period(self, text: str) -> Dict[str, Any]:
         """Pronalazi prvi i drugi datum u tekstu, ignorišući datum štampanja."""
-        # Brišemo deo oko datuma štampanja
         text = re.sub(r"(?:print|štampan|stampan|generisan).*?\d{1,2}\s+[a-zа-ш]+\s+\d{4}", "", text)
         
         months = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|maj|avg|okt|јан|феб|мар|апр|мај|јун|јул|авг|сеп|окт|нов|дец"
